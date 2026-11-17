@@ -1424,7 +1424,7 @@ Each entry is a full step-by-step execution trace:
       {
         "index": 0,
         "action_type": "CallService",
-        "description": "GET http://10.0.10.200:5005/Bathroom/favorite/0",
+        "description": "GET http://192.168.1.200:5005/Bathroom/favorite/0",
         "outcome": { "status": "ok" },
         "duration_ms": 142
       }
@@ -4874,7 +4874,7 @@ wake_on_lan                = true
 
 # Optional — pin an id, or run with discovery off
 #[[devices]]
-#host  = "10.0.10.40"
+#host  = "192.168.1.40"
 #hc_id = "roku_living_room"
 #name  = "Living Room Roku"
 #area  = "living_room"
@@ -5415,12 +5415,12 @@ condition = "current_hour() >= 6 && current_hour() < 12"
 
   [[actions.then_actions]]
   type   = "call_service"
-  url    = "http://10.0.10.200:5005/Bathroom/favorite/1"
+  url    = "http://192.168.1.200:5005/Bathroom/favorite/1"
   method = "GET"
 
   [[actions.else_actions]]
   type   = "call_service"
-  url    = "http://10.0.10.200:5005/Bathroom/favorite/0"
+  url    = "http://192.168.1.200:5005/Bathroom/favorite/0"
   method = "GET"
 ```
 
@@ -5556,8 +5556,8 @@ notify_titled("pushover", "Security Alert", "Front door opened at 2 AM.");
 Issues a fire-and-forget HTTP GET.
 
 ```rhai
-http_get("http://10.0.10.200:5005/Bathroom/stop");
-http_get("http://10.0.10.200:5005/Bathroom/favorite/0");
+http_get("http://192.168.1.200:5005/Bathroom/stop");
+http_get("http://192.168.1.200:5005/Bathroom/favorite/0");
 ```
 
 #### `http_post(url, json_body_string)`
@@ -5600,9 +5600,9 @@ type   = "run_script"
 script = """
   let hour = current_hour();
   if hour >= 6 && hour < 12 {
-      http_get("http://10.0.10.200:5005/Bathroom/favorite/1");
+      http_get("http://192.168.1.200:5005/Bathroom/favorite/1");
   } else if hour >= 12 && hour < 24 {
-      http_get("http://10.0.10.200:5005/Bathroom/favorite/0");
+      http_get("http://192.168.1.200:5005/Bathroom/favorite/0");
   }
   // midnight – 6 AM: no music
 """
@@ -5638,7 +5638,7 @@ script = """
                    `{"action":"cancel"}`);
   }
   set_device_state("lutron_21", #{ on: true });
-  http_get("http://10.0.10.200:5005/Bathroom/favorite/1");
+  http_get("http://192.168.1.200:5005/Bathroom/favorite/1");
 """
 ```
 
@@ -5748,7 +5748,7 @@ type = "parallel"
 
   [[actions.actions]]
   type    = "call_service"
-  url     = "http://10.0.10.200:5005/Backyard/say/Motion%20detected"
+  url     = "http://192.168.1.200:5005/Backyard/say/Motion%20detected"
   method  = "GET"
 
   [[actions.actions]]
@@ -6006,9 +6006,9 @@ script = """
   // Play music based on time
   let h = current_hour();
   if h >= 6 && h < 12 {
-      http_get("http://10.0.10.200:5005/Bathroom/favorite/1");
+      http_get("http://192.168.1.200:5005/Bathroom/favorite/1");
   } else if h >= 12 {
-      http_get("http://10.0.10.200:5005/Bathroom/favorite/0");
+      http_get("http://192.168.1.200:5005/Bathroom/favorite/0");
   }
   // Midnight–6 AM: exhaust fan on but no music
 """

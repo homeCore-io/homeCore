@@ -12,7 +12,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(version, about = "homeCore administration CLI")]
 struct Cli {
-    /// Base URL for TCP connection (e.g. `http://10.0.10.10:8080`).
+    /// Base URL for TCP connection (e.g. `http://192.168.1.10:8080`).
     /// If omitted, defaults to the UDS admin socket with TCP fallback.
     #[arg(long, global = true)]
     host: Option<String>,

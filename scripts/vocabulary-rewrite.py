@@ -225,7 +225,7 @@ def show(before, after):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", required=True, help="homeCore, e.g. http://10.0.10.150:8080")
+    ap.add_argument("--url", required=True, help="homeCore, e.g. http://192.168.1.10:8080")
     ap.add_argument("--user")
     ap.add_argument("--phase", required=True, choices=["now", "plugins", "core"])
     ap.add_argument("--apply", action="store_true", help="write the changes")

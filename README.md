@@ -200,7 +200,7 @@ Any request whose source IP matches `[auth].whitelist` gets **full Admin access 
 
 Two things about it bite people:
 
-- **List explicit addresses, never a CIDR range.** `whitelist = ["10.0.10.0/24"]` hands unauthenticated admin to every device on that subnet — including anything that joins it later. Write out the individual hosts.
+- **List explicit addresses, never a CIDR range.** `whitelist = ["192.168.1.0/24"]` hands unauthenticated admin to every device on that subnet — including anything that joins it later. Write out the individual hosts.
 - **It applies to the core port, wherever that is.** If a reverse proxy sits in front of homeCore, the proxy's own port may look authenticated-only while core's port is wide open to the whitelist. Check what is listening, not just what you browse to.
 
 Prefer `[auth.admin_uds]` — an admin-only Unix socket (default `/run/homecore/admin.sock`, group `homecore-admin`, mode `0660`) that gives `hc-cli` the same access with filesystem permissions instead of network identity.

@@ -101,7 +101,7 @@ Three things follow:
 **And the gateway device does not exist on the live house at all.** `host` is
 unset in the live config, and the fallback is discovery, which does not work
 from a container (see the Ecowitt notes on bridge networking). So none of this
-path has been running there. Setting `host = "10.0.10.21"` is what turns it on
+path has been running there. Setting `host = "192.168.1.21"` is what turns it on
 — a config change, not a code one.
 
 `hc-wled` is the interesting one: it already had this data and had nowhere to

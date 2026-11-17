@@ -24,11 +24,11 @@ describe("WLED settings", () => {
     expect(emptied(t(7))).toMatchObject({ en: 0, hour: 0, min: 0, macro: 0 });
   });
   it("reads and writes addresses, all zeros being DHCP", () => {
-    expect(ipText([10, 0, 10, 74])).toBe("10.0.10.74");
+    expect(ipText([192, 168, 1, 74])).toBe("192.168.1.74");
     expect(ipText([0, 0, 0, 0])).toBe("");
     expect(ipList("")).toEqual([0, 0, 0, 0]);
-    expect(ipList("10.0.10.80")).toEqual([10, 0, 10, 80]);
-    expect(ipList("10.0.10")).toBeNull();
-    expect(ipList("10.0.10.300")).toBeNull();
+    expect(ipList("192.168.1.80")).toEqual([192, 168, 1, 80]);
+    expect(ipList("192.168.1")).toBeNull();
+    expect(ipList("192.168.1.300")).toBeNull();
   });
 });

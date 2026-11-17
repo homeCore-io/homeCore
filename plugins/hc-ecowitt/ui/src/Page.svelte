@@ -226,7 +226,7 @@
 					<textarea rows="2" bind:value={form.allowed} placeholder="The gateway’s address. Ecowitt uploads have no password"></textarea></label>
 				<div class="two">
 					<label class="hc-field"><span class="hc-label">Gateway address</span>
-						<input bind:value={form.gateway_ip} placeholder="10.0.10.21" /></label>
+						<input bind:value={form.gateway_ip} placeholder="192.168.1.21" /></label>
 					<label class="hc-field"><span class="hc-label">Also read it every (s, 0 for never)</span>
 						<input type="number" min="0" bind:value={form.poll} /></label>
 				</div>

@@ -281,11 +281,11 @@ mod tests {
     #[test]
     fn populated_allowlist_only_admits_listed_peers() {
         let mut allow = HashSet::new();
-        allow.insert(ip("10.0.10.50"));
-        allow.insert(ip("10.0.10.51"));
-        assert!(ip_allowed(&allow, ip("10.0.10.50")));
-        assert!(ip_allowed(&allow, ip("10.0.10.51")));
-        assert!(!ip_allowed(&allow, ip("10.0.10.99")));
+        allow.insert(ip("192.168.1.50"));
+        allow.insert(ip("192.168.1.51"));
+        assert!(ip_allowed(&allow, ip("192.168.1.50")));
+        assert!(ip_allowed(&allow, ip("192.168.1.51")));
+        assert!(!ip_allowed(&allow, ip("192.168.1.99")));
         assert!(!ip_allowed(&allow, ip("127.0.0.1")));
     }
 

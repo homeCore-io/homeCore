@@ -995,7 +995,7 @@ pub(crate) fn address_allowed(cidrs: &[String], ip: Option<IpAddr>) -> bool {
     })
 }
 
-/// A network (`10.0.10.0/24`) or one address (`10.0.10.5`), or `None`.
+/// A network (`192.168.1.0/24`) or one address (`192.168.1.5`), or `None`.
 pub(crate) fn parse_cidr(s: &str) -> Option<ipnet::IpNet> {
     let s = s.trim();
     s.parse::<ipnet::IpNet>()
@@ -1023,21 +1023,21 @@ mod address_tests {
 
     #[test]
     fn a_network_or_one_address() {
-        let l = cidrs(&["10.0.10.0/24", "192.168.1.7"]);
-        assert!(address_allowed(&l, ip("10.0.10.150")));
-        assert!(address_allowed(&l, ip("192.168.1.7")));
-        assert!(!address_allowed(&l, ip("192.168.1.8")));
-        assert!(!address_allowed(&l, ip("10.0.11.1")));
+        let l = cidrs(&["192.168.1.0/24", "192.168.5.7"]);
+        assert!(address_allowed(&l, ip("192.168.1.10")));
+        assert!(address_allowed(&l, ip("192.168.5.7")));
+        assert!(!address_allowed(&l, ip("192.168.5.8")));
+        assert!(!address_allowed(&l, ip("192.168.2.1")));
         // A dual-stack listener reports IPv4 callers as mapped IPv6.
-        assert!(address_allowed(&l, ip("::ffff:10.0.10.9")));
+        assert!(address_allowed(&l, ip("::ffff:192.168.1.9")));
     }
 
     #[test]
     fn a_limit_fails_closed() {
-        assert!(!address_allowed(&cidrs(&["10.0.10.0/24"]), None));
+        assert!(!address_allowed(&cidrs(&["192.168.1.0/24"]), None));
         assert!(!address_allowed(
             &cidrs(&["not an address"]),
-            ip("10.0.10.1")
+            ip("192.168.1.1")
         ));
         assert!(parse_cidr("fd00::/8").is_some());
         assert!(parse_cidr(" 10.0.0.1 ").is_some());

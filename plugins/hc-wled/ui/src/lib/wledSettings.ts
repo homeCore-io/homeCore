@@ -88,7 +88,7 @@ export const TIME_ZONES = [
   "Australia Western",
 ];
 
-/** `[10,0,10,74]` ↔ `"10.0.10.74"`; all zeros is "by DHCP". */
+/** `[192,168,1,74]` ↔ `"192.168.1.74"`; all zeros is "by DHCP". */
 export const ipText = (ip: unknown) =>
   Array.isArray(ip) && ip.length === 4 && ip.some((n) => n !== 0)
     ? ip.join(".")

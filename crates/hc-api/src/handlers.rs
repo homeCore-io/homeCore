@@ -494,7 +494,7 @@ const ART_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// `GET /devices/:id/media/art` — proxies a media player's artwork.
 ///
 /// Plugins publish artwork as an absolute URL pointing at the device itself
-/// (hc-sonos gives `http://10.0.10.28:1400/getaa?...`, the speaker's own LAN
+/// (hc-sonos gives `http://192.168.1.28:1400/getaa?...`, the speaker's own LAN
 /// address). A browser usually cannot load that: it is unreachable from outside
 /// the LAN, and on an HTTPS page it is blocked outright as mixed content. So the
 /// art is published but unusable by the very frontends it exists for.
@@ -8869,10 +8869,10 @@ mod tests {
             "broker_host = \"127.0.0.1\"\n",
             "\n",
             "[server]\n",
-            "url = \"ws://10.0.10.123:3000\"\n",
+            "url = \"ws://192.168.1.123:3000\"\n",
         );
         let cfg = super::parse_config_json(toml).expect("valid TOML must parse");
-        assert_eq!(cfg["server"]["url"], "ws://10.0.10.123:3000");
+        assert_eq!(cfg["server"]["url"], "ws://192.168.1.123:3000");
         assert_eq!(cfg["homecore"]["broker_host"], "127.0.0.1");
     }
 
@@ -9949,11 +9949,11 @@ mod event_stream_tests {
             hc_core::EventBus::new(16),
             jwt,
         ));
-        state.whitelist = std::sync::Arc::new(vec!["10.0.10.200/32".parse().unwrap()]);
+        state.whitelist = std::sync::Arc::new(vec!["192.168.1.200/32".parse().unwrap()]);
         (dir, state)
     }
 
-    const UI_SERVER: &str = "10.0.10.200";
+    const UI_SERVER: &str = "192.168.1.200";
 
     /// A UI server on a whitelisted address passes the stream through for
     /// its signed-in people. Each must be streamed as who they are — as their

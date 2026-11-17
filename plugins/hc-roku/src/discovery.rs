@@ -204,7 +204,7 @@ pub async fn wake_on_lan(mac: &str, host: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// The /24 broadcast address of an IPv4 host (`10.0.10.69` → `10.0.10.255`).
+/// The /24 broadcast address of an IPv4 host (`192.168.1.69` → `192.168.1.255`).
 /// Loopback has none.
 fn subnet_broadcast(host: &str) -> Option<Ipv4Addr> {
     let ip: Ipv4Addr = host.parse().ok()?;
@@ -287,8 +287,8 @@ USN: uuid:roku:ecp:X1\r\n\r\n";
     #[test]
     fn wake_on_lan_also_goes_to_the_subnet() {
         assert_eq!(
-            subnet_broadcast("10.0.10.69"),
-            Some(Ipv4Addr::new(10, 0, 10, 255))
+            subnet_broadcast("192.168.1.69"),
+            Some(Ipv4Addr::new(192, 168, 1, 255))
         );
         assert_eq!(subnet_broadcast("127.0.0.1"), None);
         assert_eq!(subnet_broadcast("roku.local"), None);

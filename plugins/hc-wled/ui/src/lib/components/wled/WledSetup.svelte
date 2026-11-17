@@ -117,7 +117,7 @@
 	});
 	async function saveAddress() {
 		const [a, g, s] = [ipList(ip), ipList(gw), ipList(sn)];
-		if (!a || !g || !s) return void (msg = 'An address is four numbers 0–255, like 10.0.10.80.');
+		if (!a || !g || !s) return void (msg = 'An address is four numbers 0–255, like 192.168.1.80.');
 		const dhcp = a.every((n) => n === 0);
 		await putRestart(
 			dhcp

@@ -533,22 +533,22 @@ pub mod devices {
             let path = path.to_str().unwrap();
             std::fs::write(
                 path,
-                "# my WLEDs\n[wled]\npoll_interval_secs = 30 # half a minute\n\n[[devices]]\nhost = \"10.0.10.74\"\nhc_id = \"wled_6ace04\"\nname = \"wled-6ace04\"\n",
+                "# my WLEDs\n[wled]\npoll_interval_secs = 30 # half a minute\n\n[[devices]]\nhost = \"192.168.1.74\"\nhc_id = \"wled_6ace04\"\nname = \"wled-6ace04\"\n",
             )
             .unwrap();
             add(
                 path,
                 "wled_garage",
-                "10.0.10.80",
+                "192.168.1.80",
                 "Garage strip",
                 Some("garage"),
             )
             .unwrap();
-            assert!(add(path, "wled_x", "10.0.10.80", "Again", None).is_err());
+            assert!(add(path, "wled_x", "192.168.1.80", "Again", None).is_err());
             update(
                 path,
                 "wled_garage",
-                Some("10.0.10.81"),
+                Some("192.168.1.81"),
                 Some(Some(15)),
                 Some(Some("app")),
             )
@@ -557,7 +557,7 @@ pub mod devices {
             let cfg: crate::config::WledConfig =
                 toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             assert_eq!(cfg.devices.len(), 2);
-            assert_eq!(cfg.devices[1].host, "10.0.10.81");
+            assert_eq!(cfg.devices[1].host, "192.168.1.81");
             assert_eq!(cfg.devices[1].poll_interval_secs, Some(15));
             assert_eq!(cfg.devices[1].catalog.as_deref(), Some("app"));
             assert_eq!(cfg.devices[1].area.as_deref(), Some("garage"));

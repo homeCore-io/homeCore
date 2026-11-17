@@ -269,11 +269,11 @@ mod tests {
     /// time on the address the file already named.
     #[test]
     fn a_config_without_the_homecore_section_still_loads() {
-        let cfg: Config = toml::from_str("[server]\nurl = \"ws://10.0.10.123:3000\"\n")
+        let cfg: Config = toml::from_str("[server]\nurl = \"ws://192.168.1.123:3000\"\n")
             .expect("a missing [homecore] must not be fatal");
 
         // The setting the operator actually cared about.
-        assert_eq!(cfg.server.url, "ws://10.0.10.123:3000");
+        assert_eq!(cfg.server.url, "ws://192.168.1.123:3000");
         // And the section that was missing falls back to the same values it
         // would have held had it been written out in full.
         assert_eq!(cfg.homecore.broker_host, "127.0.0.1");

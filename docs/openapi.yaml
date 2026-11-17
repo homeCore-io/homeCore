@@ -3773,7 +3773,7 @@ paths:
                   items:
                     type: string
                   description: |
-                    Networks (`10.0.10.0/24`) or single addresses the key may be
+                    Networks (`192.168.1.0/24`) or single addresses the key may be
                     used from; empty (default) means anywhere. Checked on every
                     use since 0.1.80 — from anywhere else the key gets 403. The
                     address is the connection's own: through a proxy, the

@@ -1800,7 +1800,7 @@ mod tests {
     #[test]
     fn device_id_prefers_the_serial() {
         assert_eq!(
-            mint_device_id(Some("YL0001073725"), "10.0.10.69"),
+            mint_device_id(Some("YL0001073725"), "192.168.1.69"),
             "roku_yl0001073725"
         );
     }
@@ -1809,8 +1809,11 @@ mod tests {
     /// sanitised — dots are not valid in a homeCore device id.
     #[test]
     fn device_id_falls_back_to_the_host() {
-        assert_eq!(mint_device_id(None, "10.0.10.40"), "roku_10_0_10_40");
-        assert_eq!(mint_device_id(Some(""), "10.0.10.40"), "roku_10_0_10_40");
+        assert_eq!(mint_device_id(None, "192.168.1.40"), "roku_192_168_1_40");
+        assert_eq!(
+            mint_device_id(Some(""), "192.168.1.40"),
+            "roku_192_168_1_40"
+        );
     }
 
     /// M10: published again only when it jumps — not every poll it plays.
@@ -1864,12 +1867,12 @@ mod tests {
     #[test]
     fn learned_entries_old_and_new_both_read() {
         let old: Known =
-            serde_json::from_value(json!({ "hc_id": "roku_x1", "host": "10.0.10.40" })).unwrap();
+            serde_json::from_value(json!({ "hc_id": "roku_x1", "host": "192.168.1.40" })).unwrap();
         assert_eq!(old.hc_id, "roku_x1");
         assert!(old.apps.is_empty() && old.macs.is_empty());
         let new = Known {
             hc_id: "roku_x1".into(),
-            host: "10.0.10.40".into(),
+            host: "192.168.1.40".into(),
             port: None,
             macs: vec!["02:00:00:00:00:01".into()],
             name: Some("Office TV".into()),
