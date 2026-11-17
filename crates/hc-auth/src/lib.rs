@@ -1,4 +1,4 @@
-//! `hc-auth` — multi-user authentication and authorisation for HomeCore.
+//! `hc-auth` — multi-user authentication and authorisation for homeCore.
 
 pub mod actor;
 pub mod api_key;

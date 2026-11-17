@@ -172,7 +172,7 @@ pub fn load_modes(path: &Path) -> Result<Vec<ModeConfig>> {
 /// Write the complete modes list (with header comment) to `modes.toml`.
 pub fn write_modes(path: &Path, modes: &[ModeConfig]) -> Result<()> {
     let header = "\
-# HomeCore mode definitions.\n\
+# homeCore mode definitions.\n\
 # This file is managed automatically — API-created modes are appended here.\n\
 # Edit directly or use POST /api/v1/modes.\n\n";
     let body = toml::to_string(&ModesFile {

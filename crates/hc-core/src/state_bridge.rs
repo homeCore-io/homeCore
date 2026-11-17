@@ -5,7 +5,7 @@
 //! `Event::DeviceAvailabilityChanged` events for the rule engine and WebSocket
 //! clients.
 //!
-//! Topic patterns handled directly (canonical HomeCore schema):
+//! Topic patterns handled directly (canonical homeCore schema):
 //! - `homecore/devices/{id}/state`          → full state replace
 //! - `homecore/devices/{id}/state/partial`  → JSON merge-patch
 //! - `homecore/devices/{id}/availability`   → "online" | "offline"
@@ -197,7 +197,7 @@ impl StateBridge {
             }
         }
 
-        // --- Canonical HomeCore schema handling ---
+        // --- Canonical homeCore schema handling ---
         // NOTE: use `split` (unlimited) rather than `splitn(4, ...)`, since
         // 5-part topics like `homecore/plugins/{id}/manage/response` and
         // `/manage/cmd` need parts[4] to match correctly.

@@ -1,6 +1,6 @@
-# HomeCore DEV configuration
+# homeCore DEV configuration
 #
-# Used when running HomeCore from the development workspace.
+# Used when running homeCore from the development workspace.
 # Launch with run-dev.sh (repo root) or:
 #   homecore --home <workspace>/core \
 #            --config config/homecore.dev.toml

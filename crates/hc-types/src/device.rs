@@ -25,7 +25,7 @@ pub enum DeviceChangeKind {
 /// Provenance metadata for a device change.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceChange {
-    /// Timestamp when HomeCore observed or issued the change.
+    /// Timestamp when homeCore observed or issued the change.
     #[serde(default = "now_utc")]
     pub changed_at: DateTime<Utc>,
     /// Broad classification used by rules and UI.
@@ -126,7 +126,7 @@ fn classify_legacy_source(source: &str) -> DeviceChangeKind {
     }
 }
 
-/// Add reserved HomeCore command metadata to a command payload.
+/// Add reserved homeCore command metadata to a command payload.
 ///
 /// Existing command shapes remain intact. Metadata is nested under `_hc.command`
 /// and the top-level `correlation_id` is populated when absent for ecosystem
@@ -159,10 +159,10 @@ pub fn with_command_change_metadata(payload: JsonValue, change: &DeviceChange) -
     JsonValue::Object(payload)
 }
 
-/// Add reserved HomeCore state-change metadata to a state payload.
+/// Add reserved homeCore state-change metadata to a state payload.
 ///
 /// Plugins should use this when they know the provenance of the state update,
-/// especially when echoing a HomeCore command back as a resulting state change.
+/// especially when echoing a homeCore command back as a resulting state change.
 pub fn with_state_change_metadata(payload: JsonValue, change: &DeviceChange) -> JsonValue {
     let mut payload = match payload {
         JsonValue::Object(map) => map,
@@ -191,7 +191,7 @@ pub fn with_state_change_metadata(payload: JsonValue, change: &DeviceChange) -> 
     JsonValue::Object(payload)
 }
 
-/// Extract HomeCore command provenance metadata from an inbound command payload.
+/// Extract homeCore command provenance metadata from an inbound command payload.
 pub fn extract_change_from_command_payload(payload: &JsonValue) -> Option<DeviceChange> {
     if let Some(change) = payload
         .get("_hc")
@@ -218,15 +218,15 @@ pub fn extract_change_from_command_payload(payload: &JsonValue) -> Option<Device
 
 /// Resolve a command payload into a concrete change record.
 ///
-/// If the payload already contains HomeCore command metadata, it is preserved.
-/// Otherwise the command is still treated as HomeCore-originated with the
+/// If the payload already contains homeCore command metadata, it is preserved.
+/// Otherwise the command is still treated as homeCore-originated with the
 /// provided fallback source label.
 pub fn change_from_command_payload(payload: &JsonValue, fallback_source: &str) -> DeviceChange {
     extract_change_from_command_payload(payload)
         .unwrap_or_else(|| DeviceChange::homecore(fallback_source.to_string()))
 }
 
-/// Extract HomeCore state provenance metadata from an inbound state payload.
+/// Extract homeCore state provenance metadata from an inbound state payload.
 ///
 /// Reserved `_hc.change` metadata is preferred. Legacy top-level `origin`,
 /// `correlation_id`, and `timestamp` fields are also recognized.
@@ -268,7 +268,7 @@ pub fn extract_change_from_state_payload(payload: &JsonValue) -> Option<DeviceCh
 pub struct DeviceState {
     /// Stable, unique identifier assigned at plugin registration time.
     pub device_id: String,
-    /// Stable, rule-facing canonical name assigned by HomeCore.
+    /// Stable, rule-facing canonical name assigned by homeCore.
     ///
     /// Unlike `name`, this is intended to stay stable even if the display
     /// label changes. Rules may use this value instead of the plugin-owned

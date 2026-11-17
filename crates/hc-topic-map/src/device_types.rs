@@ -51,7 +51,7 @@ pub struct DeviceTypeRegistry {
     schemas: HashMap<String, Value>,
 }
 
-/// Normalize a device type name to the HomeCore canonical taxonomy where the
+/// Normalize a device type name to the homeCore canonical taxonomy where the
 /// alias is unambiguous. Unknown names are preserved as-is so callers can still
 /// surface them or warn on them.
 pub fn canonical_device_type_name(type_name: &str) -> String {
@@ -93,7 +93,7 @@ impl DeviceTypeRegistry {
         self.schemas.get(&canonical)
     }
 
-    /// Return the HomeCore device schema for a device type, or `None` if unknown.
+    /// Return the homeCore device schema for a device type, or `None` if unknown.
     pub fn get_device_schema(&self, type_name: &str) -> Option<DeviceSchema> {
         let canonical = canonical_device_type_name(type_name);
         self.schemas

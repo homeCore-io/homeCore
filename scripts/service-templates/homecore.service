@@ -1,5 +1,5 @@
 [Unit]
-Description=HomeCore Home Automation Server
+Description=homeCore Home Automation Server
 Documentation=https://github.com/homeCore-io/homeCore
 After=network-online.target
 Wants=network-online.target

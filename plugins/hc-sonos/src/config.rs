@@ -309,7 +309,7 @@ impl Default for SonosSection {
 pub struct DeviceConfig {
     /// Sonos speaker UUID (e.g. "RINCON_347E5C3D12E401400").
     pub uuid: String,
-    /// HomeCore device ID (e.g. "sonos_living_room"). The only field still
+    /// homeCore device ID (e.g. "sonos_living_room"). The only field still
     /// applied — it pins identity, which must stay stable for rules.
     pub hc_id: String,
     /// Ignored. Retained so existing config files keep parsing; the label now
@@ -329,7 +329,7 @@ pub struct DeviceConfig {
 }
 
 /// HTTP API configuration.  The API runs its own Axum server, completely
-/// independent of HomeCore.  Disable with `enabled = false`.
+/// independent of homeCore.  Disable with `enabled = false`.
 #[derive(Deserialize, Clone, Debug)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApiConfig {

@@ -1,4 +1,4 @@
-//! Dynamic device registry — auto-registers devices with HomeCore on first sight.
+//! Dynamic device registry — auto-registers devices with homeCore on first sight.
 
 use anyhow::Result;
 use plugin_sdk_rs::DevicePublisher;
@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::parser::DeviceUpdate;
 
-/// Tracks which devices have been registered with HomeCore.
+/// Tracks which devices have been registered with homeCore.
 /// On first sight of a device_id, registers it automatically.
 pub struct DeviceRegistry {
     registered: HashSet<String>,

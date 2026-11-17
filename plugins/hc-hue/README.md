@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/homeCore-io/hc-hue/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-hue/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-hue/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-hue/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
-Bridges Philips Hue devices into HomeCore via the CLIP v2 API with real-time eventstream updates.
+Bridges Philips Hue devices into homeCore via the CLIP v2 API with real-time eventstream updates.
 
 ## What it does
 

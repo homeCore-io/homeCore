@@ -256,7 +256,7 @@ impl Bridge {
         info!(
             devices = self.devices.len(),
             scenes = self.scenes.len(),
-            "All devices and scenes registered with HomeCore"
+            "All devices and scenes registered with homeCore"
         );
         live
     }
@@ -917,7 +917,7 @@ impl Bridge {
     }
 
     // -----------------------------------------------------------------------
-    // HomeCore → LIP command routing
+    // homeCore → LIP command routing
     // -----------------------------------------------------------------------
 
     async fn handle_homecore_command(

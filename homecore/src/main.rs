@@ -59,7 +59,7 @@ async fn wait_for_shutdown_watch(mut shutdown: tokio::sync::watch::Receiver<bool
 
 // ── base directory resolution ───────────────────────────────────────────────
 
-/// Determine the HomeCore installation directory.
+/// Determine the homeCore installation directory.
 ///
 /// Priority order (first match wins):
 ///   1. `--home <path>` command-line argument
@@ -353,8 +353,8 @@ async fn main() -> Result<()> {
     let base_dir = resolve_base_dir();
     let config_path = resolve_config_path(&base_dir);
 
-    eprintln!("HomeCore base directory: {}", base_dir.display());
-    eprintln!("HomeCore config file:    {}", config_path.display());
+    eprintln!("homeCore base directory: {}", base_dir.display());
+    eprintln!("homeCore config file:    {}", config_path.display());
 
     // ── 2. Load config (path defaults filled in by resolve_paths below) ───
     let load_config = || -> AppConfig {
@@ -465,7 +465,7 @@ async fn main() -> Result<()> {
     let (_logging_handle, log_tx, log_ring, log_level_handle) =
         hc_logging::init_with_broadcast(&config.logging, config.logging.stream.ring_buffer_size)?;
 
-    info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
+    info!(base = %base_dir.display(), config = %config_path.display(), "homeCore starting");
 
     // The household's temperature unit, for server-side text. °C if unset.
     if let Some(unit) = config.location.temperature_unit.as_deref() {
@@ -1535,7 +1535,7 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     warn!(
                         drain_timeout_secs,
-                        "HomeCore shutdown timed out waiting for API task — aborting"
+                        "homeCore shutdown timed out waiting for API task — aborting"
                     );
                     api_task.abort();
                     let _ = api_task.await;
@@ -1550,11 +1550,11 @@ async fn main() -> Result<()> {
             // Restart=on-failure; ask the supervisor to start it again.
             info!(
                 code = hc_api::RESTART_EXIT_CODE,
-                "HomeCore shutdown sequence complete, exiting to be restarted"
+                "homeCore shutdown sequence complete, exiting to be restarted"
             );
             std::process::exit(hc_api::RESTART_EXIT_CODE);
         }
-        info!("HomeCore shutdown sequence complete");
+        info!("homeCore shutdown sequence complete");
         std::process::exit(0);
     }
 

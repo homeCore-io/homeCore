@@ -1,5 +1,5 @@
 [Unit]
-Description=HomeCore Home Automation Server (external Mosquitto)
+Description=homeCore Home Automation Server (external Mosquitto)
 Documentation=https://homecore-io.github.io/administration/systemd-deployment
 After=network-online.target mosquitto.service
 Wants=network-online.target

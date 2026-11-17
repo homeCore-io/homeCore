@@ -2738,7 +2738,7 @@ pub async fn merge_area(
 
 // ---------- Automations (Rules) ----------
 //
-// HomeCore keeps two in-memory rule views:
+// homeCore keeps two in-memory rule views:
 // - `source_rules_handle`: the authored rule form from disk/API payloads
 // - `rules_handle`: compiled rules with device references resolved to device IDs
 // API reads should prefer the source handle so canonical names round-trip

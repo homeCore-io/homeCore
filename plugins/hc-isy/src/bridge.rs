@@ -1,14 +1,14 @@
-//! Bridge between the ISY/IoX controller and HomeCore MQTT.
+//! Bridge between the ISY/IoX controller and homeCore MQTT.
 //!
 //! # Flow
 //!
 //! 1. SDK handles MQTT connection — commands arrive via `mpsc` channel
 //! 2. Fetch all ISY nodes + full status via REST
-//! 3. Register every enabled node with HomeCore, publish initial state
+//! 3. Register every enabled node with homeCore, publish initial state
 //! 4. Connect WebSocket to ISY `/rest/subscribe`
 //! 5. Event loop:
 //!    - ISY WS event → translate → `DevicePublisher::publish_state_partial`
-//!    - HomeCore cmd  → translate → ISY REST command (via reqwest)
+//!    - homeCore cmd  → translate → ISY REST command (via reqwest)
 //! 6. Reconnect on any error with exponential back-off
 
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ use crate::isy::{addr_to_device_id, parse_event_xml, IsyClient};
 // Device registry
 // ---------------------------------------------------------------------------
 
-/// Everything needed to translate between HomeCore device IDs and ISY.
+/// Everything needed to translate between homeCore device IDs and ISY.
 struct Registry {
     /// device_id → device kind
     kinds: HashMap<String, DeviceKind>,
@@ -181,7 +181,7 @@ async fn run_once(
     }
     info!(
         registered = kinds.len(),
-        "All ISY devices registered with HomeCore"
+        "All ISY devices registered with homeCore"
     );
 
     let mut registry = Registry { kinds, addrs, ctxs };
@@ -211,7 +211,7 @@ async fn run_once(
     let (_ws_tx, mut ws_rx) = ws_stream.split();
     info!(url = %ws_url, "ISY WebSocket connected");
 
-    // ── Event loop: WS events + HomeCore commands ─────────────────────
+    // ── Event loop: WS events + homeCore commands ─────────────────────
     use tokio_tungstenite::tungstenite::Message;
     loop {
         tokio::select! {

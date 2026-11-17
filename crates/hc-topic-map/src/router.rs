@@ -1,8 +1,8 @@
 //! Ecosystem router.
 //!
 //! Matches incoming MQTT topics against all loaded ecosystem profiles and
-//! returns translated HomeCore events. Also handles the outbound path:
-//! HomeCore cmd → native device command topic.
+//! returns translated homeCore events. Also handles the outbound path:
+//! homeCore cmd → native device command topic.
 
 use crate::coerce;
 use crate::pattern::{match_segments, parse_pattern, render_template, sanitize_id, Segment};
@@ -32,7 +32,7 @@ pub enum InboundResult {
     Availability { device_id: String, available: bool },
 }
 
-/// What the router produces for an outbound HomeCore cmd.
+/// What the router produces for an outbound homeCore cmd.
 #[derive(Debug)]
 pub struct OutboundResult {
     pub target_topic: String,
@@ -287,7 +287,7 @@ impl EcosystemRouter {
     // Outbound routing
     // -----------------------------------------------------------------------
 
-    /// Route an outbound HomeCore cmd. Returns `None` if no profile matches,
+    /// Route an outbound homeCore cmd. Returns `None` if no profile matches,
     /// or `Some(vec)` with one result per native publish (alias_reverse may
     /// produce one publish per attribute in the cmd payload).
     pub fn route_outbound(
@@ -330,7 +330,7 @@ impl EcosystemRouter {
             }]);
         }
 
-        // Parse HomeCore cmd payload as JSON.
+        // Parse homeCore cmd payload as JSON.
         let cmd_value: Value = serde_json::from_slice(raw_payload)
             .map_err(|e| anyhow!("cmd payload is not valid JSON: {e}"))?;
 
@@ -391,7 +391,7 @@ impl EcosystemRouter {
 // ---------------------------------------------------------------------------
 
 /// Apply field_map (with dot-notation source keys) and coercions to an inbound
-/// JSON payload, returning a new JSON object with HomeCore canonical attribute names.
+/// JSON payload, returning a new JSON object with homeCore canonical attribute names.
 /// Keys not present in field_map are passed through unchanged.
 fn apply_field_map(
     payload: &Value,
@@ -431,7 +431,7 @@ fn apply_field_map(
 }
 
 /// Apply field_map and coercions for the outbound (cmd) direction.
-/// field_map here renames HomeCore attribute names to ecosystem keys.
+/// field_map here renames homeCore attribute names to ecosystem keys.
 fn apply_field_map_cmd(
     payload: &Value,
     field_map: &HashMap<String, String>,
@@ -485,7 +485,7 @@ fn build_rpc_payload(
     cmd: &Value,
     field_map: &HashMap<String, String>,
 ) -> Result<Value> {
-    // Rename HomeCore keys to ecosystem keys for params.
+    // Rename homeCore keys to ecosystem keys for params.
     let mut params: Map<String, Value> = Map::new();
     if let Some(obj) = cmd.as_object() {
         for (hc_key, v) in obj {
@@ -523,7 +523,7 @@ fn result_device_id(r: &InboundResult) -> &str {
     }
 }
 
-/// Resolve the HomeCore device ID for a state topic match.
+/// Resolve the homeCore device ID for a state topic match.
 fn resolve_device_id(
     config: &StateTopicConfig,
     prefix: &str,

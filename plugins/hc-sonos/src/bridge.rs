@@ -1,7 +1,7 @@
 //! Main bridge event loop.
 //!
 //! Speaker handles and last-known state live in `SharedState` so the HTTP API
-//! can access them directly without going through HomeCore.
+//! can access them directly without going through homeCore.
 //!
 //! State changes are driven by UPnP GENA NOTIFY events rather than polling.
 //! A heartbeat (every 60 s) asks every speaker for its whole state at once —
@@ -353,7 +353,7 @@ impl Bridge {
 
                 cmd = homecore_rx.recv() => match cmd {
                     Some((hc_id, payload)) => self.handle_command(hc_id, payload).await,
-                    None => { info!("HomeCore channel closed"); return; }
+                    None => { info!("homeCore channel closed"); return; }
                 },
 
                 Some((uuid, event)) = event_rx.recv() =>
@@ -735,7 +735,7 @@ impl Bridge {
         self.save_roster();
         self.declare(&uuid).await;
 
-        // Initial state poll so HomeCore has state before the first GENA event.
+        // Initial state poll so homeCore has state before the first GENA event.
         match within(speaker::poll(&speaker, caps)).await {
             Ok(s) => self.keep_polled(&uuid, s).await,
             Err(e) => warn!(hc_id, error = %e, "Initial poll failed"),
@@ -1471,7 +1471,7 @@ impl Bridge {
         });
     }
 
-    // ── HomeCore command handling ─────────────────────────────────────────────
+    // ── homeCore command handling ─────────────────────────────────────────────
 
     async fn handle_command(&mut self, hc_id: String, cmd: Value) {
         let Some(uuid) = self.hc_to_uuid.get(&hc_id).cloned() else {

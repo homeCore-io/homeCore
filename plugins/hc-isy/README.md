@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/homeCore-io/hc-isy/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-isy/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-isy/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-isy/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
-Bridges Universal Devices ISY/IoX controllers (ISY994i, eISY, Polisy) into HomeCore via REST + WebSocket.
+Bridges Universal Devices ISY/IoX controllers (ISY994i, eISY, Polisy) into homeCore via REST + WebSocket.
 
 ## Supported device types
 
-| ISY Category | HomeCore device_type | Notes |
+| ISY Category | homeCore device_type | Notes |
 |---|---|---|
 | Dimmers (cat 1, UOM 100 or 51) | `light` | On/off and brightness in % |
 | Relays/switches (UOM 78) | `switch` | On/off |

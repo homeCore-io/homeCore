@@ -19,7 +19,7 @@
 #   scene         — ISY scenes / Insteon node groups
 
 # ---------------------------------------------------------------------------
-# HomeCore broker connection
+# homeCore broker connection
 # ---------------------------------------------------------------------------
 [homecore]
 broker_host = "127.0.0.1"

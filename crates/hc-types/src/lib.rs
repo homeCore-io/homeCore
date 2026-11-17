@@ -1,9 +1,9 @@
-//! `hc-types` — shared domain types for the HomeCore platform.
+//! `hc-types` — shared domain types for the homeCore platform.
 //!
 //! This crate is the single source of truth for all types that cross crate
 //! boundaries: device state, events, automation rules, and MQTT messages.
 //! Every other crate in the workspace depends on this one; it intentionally
-//! has no internal (HomeCore) dependencies.
+//! has no internal (homeCore) dependencies.
 
 /// Wire-protocol version this build emits and consumes — the SemVer of
 /// `hc-types` itself. Used by core's startup log and `state_bridge`'s

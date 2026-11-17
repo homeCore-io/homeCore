@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-service.sh — Install HomeCore as a system daemon (Linux/macOS).
+# install-service.sh — Install homeCore as a system daemon (Linux/macOS).
 #
 # Supports:
 #   Linux  — systemd (systemctl)
@@ -9,7 +9,7 @@
 #   ./scripts/install-service.sh [OPTIONS]
 #
 # Options:
-#   --install-dir DIR   HomeCore installation directory
+#   --install-dir DIR   homeCore installation directory
 #                       (default: /opt/homecore on Linux, ~/homecore on macOS)
 #   --user USER         Run service as this user (Linux only; default: current user)
 #   --system            Install as a system-level daemon (macOS: LaunchDaemons,

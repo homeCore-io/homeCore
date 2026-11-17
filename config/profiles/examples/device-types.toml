@@ -1,4 +1,4 @@
-# HomeCore Device Type Catalog
+# homeCore Device Type Catalog
 #
 # Defines canonical attribute schemas for standard device types.
 # Plugins and ecosystem profiles reference types by name instead of
@@ -7,7 +7,7 @@
 # Usage:
 #   - Copy this file to config/profiles/device-types.toml to activate it.
 #   - Add custom types at the bottom; do not modify the standard types above
-#     the "CUSTOM TYPES" section — future HomeCore updates may replace this file.
+#     the "CUSTOM TYPES" section — future homeCore updates may replace this file.
 #
 # Attribute fields:
 #   type     — "boolean" | "integer" | "number" | "string" | "object"
@@ -532,5 +532,5 @@ description = "Generic sensor — use when no specific type applies"
 # ===========================================================================
 # CUSTOM TYPES — add your own below this line
 # This section is safe to edit; the section above may be overwritten by
-# HomeCore updates.
+# homeCore updates.
 # ===========================================================================

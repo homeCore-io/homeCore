@@ -323,7 +323,7 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
-// HomeCore broker connection
+// homeCore broker connection
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -417,7 +417,7 @@ fn default_hold_threshold_ms() -> u64 {
 /// as a physical button would be — the bridge then runs whatever the Lutron
 /// app programmed onto it.
 ///
-/// HomeCore device ID: `caseta_scene_{name_slug}` of the name it had when the
+/// homeCore device ID: `caseta_scene_{name_slug}` of the name it had when the
 /// plugin first saw it — kept on a rename (see `crate::devices::scene_ids`),
 /// so automations survive the scene being renamed in the Lutron app.
 /// Commands accepted:  `{"action": "activate"}` (or `{ "activate": true }`)
@@ -430,7 +430,7 @@ pub struct SceneConfig {
     pub bridge_id: u32,
     /// Phantom button component number (1-100) assigned in the Lutron app.
     pub button_component: u32,
-    /// Optional HomeCore area tag.
+    /// Optional homeCore area tag.
     pub area: Option<String>,
 }
 
@@ -439,7 +439,7 @@ fn default_bridge_id() -> u32 {
 }
 
 impl SceneConfig {
-    /// HomeCore device ID: `caseta_scene_{name_slug}`.
+    /// homeCore device ID: `caseta_scene_{name_slug}`.
     pub fn hc_id(&self) -> String {
         let slug = self
             .name

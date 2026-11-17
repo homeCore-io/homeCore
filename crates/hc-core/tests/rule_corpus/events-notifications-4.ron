@@ -21,7 +21,7 @@ Rule(
             let t = trigger_value();
             notify_titled("telegram", "Temperature Alert",
                 "Basement temperature is " + t + " °C. Check the HVAC!");
-            notify_titled("email-alerts", "HomeCore Temperature Alert",
+            notify_titled("email-alerts", "homeCore Temperature Alert",
                 "Basement temperature alert: " + t + " °C");
         "#)),
     ],

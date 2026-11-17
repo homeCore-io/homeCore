@@ -31,7 +31,7 @@ use plugin_sdk_rs::{DevicePublisher, PluginNotices, PluginStateWriter};
 pub struct Bridge {
     /// integration_id → device
     devices: HashMap<u32, DeviceEntry>,
-    /// hc_id → integration_id (for routing HomeCore commands)
+    /// hc_id → integration_id (for routing homeCore commands)
     hc_to_id: HashMap<String, u32>,
     /// Scenes list
     scenes: Vec<SceneEntry>,
@@ -131,7 +131,7 @@ impl Bridge {
         loop {
             match self.run_once(&mut homecore_rx, &mut learned_rx).await {
                 Ok(()) => {
-                    // HomeCore channel closed — clean shutdown
+                    // homeCore channel closed — clean shutdown
                     info!("Bridge shutting down");
                     return;
                 }
@@ -192,9 +192,9 @@ impl Bridge {
         // Reset backoff to minimum on successful connect
         // (done in caller after Ok return — here we just proceed)
 
-        // Re-register all devices, scenes, and timeclock events with HomeCore on every connection.
-        // This ensures HomeCore always has current device info (name, area, type)
-        // from the config file, even after a HomeCore restart.
+        // Re-register all devices, scenes, and timeclock events with homeCore on every connection.
+        // This ensures homeCore always has current device info (name, area, type)
+        // from the config file, even after a homeCore restart.
         self.register_all_devices().await;
 
         // Publish initial enabled=true state for all timeclock events (optimistic assumption).
@@ -233,13 +233,13 @@ impl Bridge {
                     self.handle_lip_message(msg, &write_tx, &hold_tx).await;
                 }
 
-                // ── Commands from HomeCore ─────────────────────────────────
+                // ── Commands from homeCore ─────────────────────────────────
                 cmd = homecore_rx.recv() => {
                     match cmd {
                         Some((hc_id, payload)) => {
                             self.handle_homecore_command(&hc_id, payload, &write_tx).await;
                         }
-                        None => return Ok(()), // HomeCore channel closed
+                        None => return Ok(()), // homeCore channel closed
                     }
                 }
 
@@ -534,7 +534,7 @@ impl Bridge {
     }
 
     // -----------------------------------------------------------------------
-    // HomeCore command handler
+    // homeCore command handler
     // -----------------------------------------------------------------------
 
     async fn handle_homecore_command(
@@ -902,7 +902,7 @@ impl Bridge {
             }
         }
         info!(
-            "Re-registered {} devices, {} scenes, {} timeclock events with HomeCore",
+            "Re-registered {} devices, {} scenes, {} timeclock events with homeCore",
             self.devices.len(),
             self.scenes.len(),
             self.time_clocks.len()

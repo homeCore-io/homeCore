@@ -7,7 +7,7 @@
 //! # Main types
 //!
 //! - [`EcosystemRouter`] — matches MQTT topics against loaded profiles and
-//!   translates them to/from the HomeCore canonical schema.
+//!   translates them to/from the homeCore canonical schema.
 //! - [`DeviceTypeRegistry`] — resolves device type names to JSON Schema objects.
 //!
 //! # Quick start

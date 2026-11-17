@@ -596,7 +596,7 @@ pub async fn fetch_and_save(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("HomeCore/1.0 (ical-fetcher)")
+        .user_agent("homeCore/1.0 (ical-fetcher)")
         .build()?;
 
     let resp = client

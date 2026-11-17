@@ -1,4 +1,4 @@
-# HomeCore Admin — Leptos First-Class Design
+# homeCore Admin — Leptos First-Class Design
 
 **Status:** Design draft — iterate before implementation  
 **Goal:** A production-quality admin UI that is an integral part of the homeCore

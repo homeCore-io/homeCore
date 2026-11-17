@@ -1,9 +1,9 @@
-## HomeCore Matter Plugin Plan (matter.js)
+## homeCore Matter Plugin Plan (matter.js)
 
 ### Goal
-Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js](https://github.com/matter-js/matter.js), a production-grade TypeScript/JavaScript implementation of the Matter protocol. Enable HomeCore to:
+Build a fresh Matter controller and bridge plugin for homeCore using [matter.js](https://github.com/matter-js/matter.js), a production-grade TypeScript/JavaScript implementation of the Matter protocol. Enable homeCore to:
 1. **Commission and control** native Matter devices (lights, sensors, switches, locks, etc.)
-2. **Expose HomeCore devices** as Matter-compliant endpoints to external Matter controllers
+2. **Expose homeCore devices** as Matter-compliant endpoints to external Matter controllers
 3. Provide **persistent fabric management**, subscriptions, and state synchronization
 
 ### Current Phase Status (2026-03-30)
@@ -12,7 +12,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
   - Verified command result contracts for success/error flows including structured codes and correlation IDs.
 - Phase 1: complete
   - Completed passes: runtime-backed commissioning flow (with deterministic simulation fallback), controller metrics/status publishing, runtime commissioning snapshot surfaced in command results, reconnect subscription reattach telemetry, controller brightness/lock/cover command handling, runtime-originated brightness callback publishing, controller correlation-id deduplication/idempotency for device commands, device command execution result/metrics reporting, and validated mapper normalization tests for initial device set.
-  - Completed bridge baseline: endpoint inventory from controller registry, deterministic exposed endpoint IDs, include/exclude/device-type filtering, reconnect-safe state topic subscriptions, inbound HomeCore state tracking per bridged endpoint, bridge endpoint snapshot inventory publication, bridge observability metrics in plugin metrics publishing, and bridge command-topic forwarding into HomeCore device command topics (including endpoint-ID addressed routing and bridge command_result success/error reporting).
+  - Completed bridge baseline: endpoint inventory from controller registry, deterministic exposed endpoint IDs, include/exclude/device-type filtering, reconnect-safe state topic subscriptions, inbound homeCore state tracking per bridged endpoint, bridge endpoint snapshot inventory publication, bridge observability metrics in plugin metrics publishing, and bridge command-topic forwarding into homeCore device command topics (including endpoint-ID addressed routing and bridge command_result success/error reporting).
 - Phase 2: complete (bridge endpoint exposure foundation)
   - [Full documentation above in detailed waves 1-3]
   - Verified baseline (end of wave 3):
@@ -23,7 +23,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - ✅ Endpoint factory creating cluster specs for all 10 device types
       - ✅ Bridge lifecycle composing endpoints and tracking them
       - ✅ Runtime creating matter.js bridge with composed endpoints
-      - ✅ Bidirectional attribute synchronization (HomeCore ↔ Matter)
+      - ✅ Bidirectional attribute synchronization (homeCore ↔ Matter)
 - Phase 3: complete (bridge discovery and external controller integration)
   - Completed in session 2026-03-30 (fourth wave - real bridge discovery and external controller testing):
     - **Device-type expansion** (commit 9e69e8f):
@@ -47,20 +47,20 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
     - **Bidirectional command flow tests** (commit 4c20b62):
       - Created `tests/bidirectional-flow.test.ts` with MockHomeCoreDevice and MockBridgeAttributeAccessor
       - 15 new tests covering complete round-trip flows:
-        - **HomeCore → Bridge → External Controller path**: state changes propagate through attribute updates
+        - **homeCore → Bridge → External Controller path**: state changes propagate through attribute updates
           - Light on/off state sync (boolean)
           - Brightness changes with scale conversion (0-100% ↔ 0-254)
           - Temperature sensor reading sync (°C ↔ centidegrees)
           - Humidity sync (% ↔ 0-10000 range)
           - Motion detection (boolean ↔ occupancy bitmap)
           - Lock state changes (boolean ↔ Matter enum)
-        - **External Controller → Bridge → HomeCore path**: commands route through device command queue
+        - **External Controller → Bridge → homeCore path**: commands route through device command queue
           - Light on/off command routing
           - Brightness control with inverse scale conversion
           - Lock command handling
           - Cover position control
         - **Complete round-trip scenarios**:
-          - Full brightness adjustment cycle (command → HomeCore → HomeCore response → Bridge update)
+          - Full brightness adjustment cycle (command → homeCore → homeCore response → Bridge update)
           - Multiple concurrent device state changes
           - Partial state updates via separate topics
           - Command ordering and rapid sequential commands
@@ -87,7 +87,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - Metrics system: f94f8f4 (21 metrics tests, 209 tests)
     - Phase 3 completion:
       - ✅ External controller discovery simulation fully tested
-      - ✅ Bidirectional command path validation (HomeCore ↔ Bridge ↔ Controller)
+      - ✅ Bidirectional command path validation (homeCore ↔ Bridge ↔ Controller)
       - ✅ Complete round-trip attribute synchronization
       - ✅ Comprehensive metrics and observability system
       - ✅ Support for 13 device types (10 original + 3 new sensors)
@@ -156,7 +156,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - Implemented `MatterBridgeBinding` class with lifecycle: `createBridge()`, `dispose()`.
       - Bridge endpoint creation: takes composed specs and creates matter.js bridge with all endpoints.
       - Cluster initialization with Matter standard cluster IDs (OnOff 0x0006, LevelControl 0x0008, etc.).
-      - Device type mapping: HomeCore types → Matter device type IDs (OnOffLight 0x0100, DoorLock 0x000a, etc.).
+      - Device type mapping: homeCore types → Matter device type IDs (OnOffLight 0x0100, DoorLock 0x000a, etc.).
       - Attribute state management: tracks cluster state for all endpoints.
       - Method `setAttributeValue()` for attribute updates with optional matter.js endpoint binding.
       - Added 7 new tests for bridge binding initialization, endpoint creation, device type mapping.
@@ -168,7 +168,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - Error handling with logging guidance for missing matter.js.
       - Runtime bridge binding accessible via `getBridgeBinding()` for downstream components.
     - **Attribute Handlers and Bidirectional Sync** (commit 90b7cf2):
-      - Created `src/bridge/attribute-handlers.ts` for HomeCore ↔ Matter synchronization.
+      - Created `src/bridge/attribute-handlers.ts` for homeCore ↔ Matter synchronization.
       - Implemented `BridgeAttributeHandlers` with lifecycle: `start()`, `stop()`.
       - Subscribes to `homecore/devices/+/state` and `+/state/partial` MQTT topics.
       - Value conversion functions for bidirectional sync:
@@ -176,8 +176,8 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
         - Lock state: boolean ↔ Matter enum (1=locked, 2=unlocked)
         - Motion detection: boolean ↔ occupancy bitmap bit 0
         - Color temperature in mireds, position percentage preserved as-is
-      - `syncStateToAttributes()` routes HomeCore state to Matter endpoint attributes in real-time.
-      - `sendDeviceCommand()` handles Matter attribute writes → HomeCore device commands.
+      - `syncStateToAttributes()` routes homeCore state to Matter endpoint attributes in real-time.
+      - `sendDeviceCommand()` handles Matter attribute writes → homeCore device commands.
       - Added 10 new tests for attribute conversion, handler initialization, get writable attributes.
       - Test count increased from 116 to 126; all passing.
     - **Attribute Handlers Plugin Integration** (commit 072aca4):
@@ -195,7 +195,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - ✅ Endpoint factory creating cluster specs for all 10 device types
       - ✅ Bridge lifecycle composing endpoints and tracking them
       - ✅ Runtime creating matter.js bridge with composed endpoints
-      - ✅ Bidirectional attribute synchronization (HomeCore ↔ Matter)
+      - ✅ Bidirectional attribute synchronization (homeCore ↔ Matter)
 
 ### Phase 4: Commissioning and MDNS Discovery
 - Completed in session 2026-03-30 (extensions after Phase 3):
@@ -255,7 +255,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
    - ✅ **Runtime registration** (6c45d6d): Bridge endpoint registration API
    - ✅ **Matter bridge binding** (04fb0b9): matter.js Bridge creation with endpoints, 7 tests
    - ✅ **Plugin lifecycle** (fe424f7): Runtime + bridge binding integrated
-   - ✅ **Attribute handlers** (90b7cf2): Bidirectional HomeCore ↔ Matter sync, 10 tests
+   - ✅ **Attribute handlers** (90b7cf2): Bidirectional homeCore ↔ Matter sync, 10 tests
    - ✅ **Lifecycle integration** (072aca4): Handlers active on startup
 5. Phase 3 bridge discovery and external controller integration (COMPLETE):
    - ✅ **Device expansion** (9e69e8f): 3 new sensor types + Matter cluster IDs
@@ -289,7 +289,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
   - Mature, production-grade Matter protocol stack with a large active user base
   - JavaScript/TypeScript: faster iteration, easier debugging, rich npm ecosystem
   - Standalone Node.js process: clean separation, reusable plugin pattern
-  - WebSocket bridge: natural fit for HomeCore's MQTT event model
+  - WebSocket bridge: natural fit for homeCore's MQTT event model
   - Active community with reference implementations and examples
   - v0.16+ feature-complete for controller and bridge roles
 
@@ -303,7 +303,7 @@ Reference integration points:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ HomeCore (Rust)                                                 │
+│ homeCore (Rust)                                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ hc-core / hc-api (REST, WS, MQTT)                        │  │
 │  │  - Rule engine, state store, device registry            │  │
@@ -328,10 +328,10 @@ Reference integration points:
 │  │  - Fabric store (JSON±enc)   │                             │
 │  │  - mDNS discovery            │  ┌──────────────────────┐   │
 │  └──────────────────────────────┘  │ State Publisher      │   │
-│   ↕ (Matter protocol)               │ (HomeCore sync)      │   │
+│   ↕ (Matter protocol)               │ (homeCore sync)      │   │
 │  ┌──────────────────────────────┐  └──────────────────────┘   │
 │  │ Device Mapper                │                             │
-│  │ (HomeCore ↔ Matter)          │  ┌──────────────────────┐   │
+│  │ (homeCore ↔ Matter)          │  ┌──────────────────────┐   │
 │  └──────────────────────────────┘  │ Commissioning Flow   │   │
 │                                    │ (QR/passcode)        │   │
 │                                    └──────────────────────┘   │
@@ -352,13 +352,13 @@ Reference integration points:
 - Parse CLI args (config path, home directory)
 - Initialize logging (daily file appender to `logs/`)
 - Load configuration (`config/homecore-matter.toml`)
-- Instantiate WebSocket client and connect to HomeCore
+- Instantiate WebSocket client and connect to homeCore
 - Start matter.js controller/bridge reactor
 - Graceful shutdown on SIGTERM/SIGINT
 - Startup retry logic: 3 attempts with 60s delay
 
 #### 2. **WebSocket Bridge** (`src/ws-bridge.ts`)
-- **Outbound**: Publish device state updates as HomeCore MQTT messages
+- **Outbound**: Publish device state updates as homeCore MQTT messages
 - **Inbound**: Subscribe to command topics (`homecore/devices/{id}/cmd`) via WS event stream
 - Bidirectional message routing (validate schema, retry on disconnect)
 - Reconnection logic with exponential backoff
@@ -369,33 +369,33 @@ Stateful commission/control engine:
 - **Fabric Manager**: Persist commissioned nodes in `data/matter/fabric_store.json`
 - **Commission Flow**: QR code / passcode parsing, commissioning window, node registration
 - **Subscriptions**: Listen to device attribute changes (OnOff, Level, Occupancy, etc.)
-- **Command Path**: Translate HomeCore commands → Matter cluster writes/commands
+- **Command Path**: Translate homeCore commands → Matter cluster writes/commands
 - **Retry & Recovery**: Subscription re-attach on network reconnect
 
 **Sub-modules**:
 - `fabric-store.ts`: Load/persist encrypted fabric, nodes, sessions
 - `commission.ts`: Passcode validation, commissioning window management
-- `subscription.ts`: Attribute listener setup + HomeCore state sync
+- `subscription.ts`: Attribute listener setup + homeCore state sync
 - `command-handler.ts`: Inbound command dispatch (on/off, brightness, lock, etc.)
 
 #### 4. **Bridge** (`src/bridge/index.ts`)
-Exposes HomeCore devices as Matter endpoints:
-- **Endpoint Registry**: Stable deterministic IDs (hash of HomeCore device_id)
+Exposes homeCore devices as Matter endpoints:
+- **Endpoint Registry**: Stable deterministic IDs (hash of homeCore device_id)
 - **Cluster Composition**: Device-type → clusters mapping (e.g., Light → OnOff + LevelControl)
-- **State Mirroring**: HomeCore state → Matter attribute publications
-- **Command Capture**: External controller commands → HomeCore device topic
+- **State Mirroring**: homeCore state → Matter attribute publications
+- **Command Capture**: External controller commands → homeCore device topic
 
 **Sub-modules**:
-- `endpoint-factory.ts`: Create Matter endpoints from HomeCore device templates
+- `endpoint-factory.ts`: Create Matter endpoints from homeCore device templates
 - `cluster-mapper.ts`: Bidirectional mapping (e.g., on_off ↔ OnOff.onOff)
-- `state-sync.ts`: Watch HomeCore device state, publish to Matter clusters
+- `state-sync.ts`: Watch homeCore device state, publish to Matter clusters
 
 #### 5. **Device Mapper** (`src/mapper/index.ts`)
-Normalizes HomeCore ↔ Matter device/cluster semantics:
+Normalizes homeCore ↔ Matter device/cluster semantics:
 
 **Supported Device Types**:
 
-| HomeCore Type         | Matter Device      | Clusters                        |
+| homeCore Type         | Matter Device      | Clusters                        |
 |-----------------------|-------------------|---------------------------------|
 | `light`               | DimmableLight      | OnOff, LevelControl             |
 | `light_color`         | ExtendedColorLight | OnOff, LevelControl, ColorControl |
@@ -409,16 +409,16 @@ Normalizes HomeCore ↔ Matter device/cluster semantics:
 | `cover`               | WindowCovering     | WindowCovering                  |
 
 **Attribute Mappings**:
-- HomeCore `on` + `brightness_pct` ↔ Matter `OnOff.onOff` + `LevelControl.currentLevel`
-- HomeCore `temperature` ↔ Matter `TemperatureMeasurement.measuredValue` (centidegrees)
-- HomeCore `open`/`closed` ↔ Matter `BooleanState.stateValue`
-- HomeCore `locked`/`unlocked` ↔ Matter `DoorLock.lockState`
+- homeCore `on` + `brightness_pct` ↔ Matter `OnOff.onOff` + `LevelControl.currentLevel`
+- homeCore `temperature` ↔ Matter `TemperatureMeasurement.measuredValue` (centidegrees)
+- homeCore `open`/`closed` ↔ Matter `BooleanState.stateValue`
+- homeCore `locked`/`unlocked` ↔ Matter `DoorLock.lockState`
 
 #### 6. **Configuration** (`config/homecore-matter.toml`)
 
 ```toml
 [homecore]
-# WebSocket connection to HomeCore
+# WebSocket connection to homeCore
 ws_url = "ws://localhost:9001"  # or set WS_URL env var
 reconnect_delay_secs = 5
 max_reconnect_attempts = 0  # infinite
@@ -435,7 +435,7 @@ security_provider = "plaintext"
 # security_key_env_var = "HC_MATTER_STORE_KEY"  # default
 
 # mDNS advertising
-instance_name = "HomeCore"
+instance_name = "homeCore"
 passcode_default = 12345678
 discriminator_default = 3840  # 0-4095; if not set, random
 
@@ -464,9 +464,9 @@ file_path = "logs/hc-matter.log"
 ```
 
 #### 7. **State Publisher** (`src/state-publisher.ts`)
-Emits device state updates back to HomeCore:
+Emits device state updates back to homeCore:
 - **Deduplication**: Only publish if state changed (avoid spam)
-- **Payload Format**: Follow HomeCore MQTT contract:
+- **Payload Format**: Follow homeCore MQTT contract:
   ```json
   {
     "on": true,
@@ -483,10 +483,10 @@ Emits device state updates back to HomeCore:
 ## Communication Contract
 
 ### WebSocket Protocol
-Authenticate and subscribe to HomeCore MQTT topics:
+Authenticate and subscribe to homeCore MQTT topics:
 
 ```json
-// Handshake (plugin → HomeCore)
+// Handshake (plugin → homeCore)
 {
   "type": "register",
   "plugin_id": "matter",
@@ -500,7 +500,7 @@ Authenticate and subscribe to HomeCore MQTT topics:
   "topic": "homecore/devices/+/cmd"
 }
 
-// Publish device state (plugin → HomeCore)
+// Publish device state (plugin → homeCore)
 {
   "type": "publish",
   "topic": "homecore/devices/light.living_room_1/state",
@@ -520,7 +520,7 @@ Authenticate and subscribe to HomeCore MQTT topics:
 - **Plugin status**: `homecore/plugins/matter/status` (startup, heartbeat, shutdown)
 - **Plugin metrics**: `homecore/plugins/matter/metrics` (commissioned_nodes, bridged_endpoints, etc.)
 
-### API Routes Expected in HomeCore
+### API Routes Expected in homeCore
 ```
 GET    /api/v1/plugins/matter/status           # Plugin health + node count
 POST   /api/v1/plugins/matter/commission       # Start commissioning
@@ -535,18 +535,18 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 ## Implementation Phases
 
 ### Phase 0: Spike & Validation (1 week)
-**Goal**: Prove matter.js integration works with HomeCore
+**Goal**: Prove matter.js integration works with homeCore
 
 **Deliverables**:
 1. Scaffold Node.js project (TypeScript, matter.js 0.16+, WebSocket)
 2. Implement WebSocket client (handshake + state publish)
 3. Standalone matter.js controller (OnOff light, minimal)
-4. Manual test: commission a test bulb, toggle from HomeCore via REST
+4. Manual test: commission a test bulb, toggle from homeCore via REST
 5. Validate logging, error handling, startup sequence
 
 **Exit Criteria**:
 - ✅ matter.js compiles, npm dependencies resolve
-- ✅ WebSocket connects to local HomeCore and publishes test state  
+- ✅ WebSocket connects to local homeCore and publishes test state  
 - ✅ Can commission one Matter device and read state
 
 ### Phase 1: Controller MVP (2-3 weeks)
@@ -555,7 +555,7 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 **Deliverables**:
 1. Fabric store with encryption (plaintext + env-based key option)
 2. Commission flow (QR code, passcode, manual entry via API)
-3. Device type → HomeCore type normalization (5+ device types)
+3. Device type → homeCore type normalization (5+ device types)
 4. Subscription engine (re-subscribe on network reconnect)
 5. Command handler (on/off, brightness, lock, temperature setpoint, etc.)
 6. Error handling & recovery (malformed state, command failures, fabric corruption)
@@ -574,26 +574,26 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 
 **Exit Criteria**:
 - ✅ Commission 2+ different Matter device types, survive plugin restart
-- ✅ Control from HomeCore REST API (`POST /api/v1/plugins/matter/commission`, etc.)
-- ✅ State updates appear in HomeCore UI (via MQTT state topic)
+- ✅ Control from homeCore REST API (`POST /api/v1/plugins/matter/commission`, etc.)
+- ✅ State updates appear in homeCore UI (via MQTT state topic)
 - ✅ Subscriptions survive network blip (re-attach automatically)
 
 ### Phase 2: Bridge MVP (2-3 weeks)
-**Goal**: Expose HomeCore devices as Matter endpoints
+**Goal**: Expose homeCore devices as Matter endpoints
 
 **Deliverables**:
 1. Stable endpoint ID strategy (deterministic hashing that survives restarts and device renames)
 2. Device include/exclude filtering (explicit IDs + glob patterns + device_type/area filters)
 3. Deterministic cluster composition by device_type
-4. State bidirectional sync (HomeCore → Matter + Matter → HomeCore)
+4. State bidirectional sync (homeCore → Matter + Matter → homeCore)
 5. External controller command handling (Apple Home, Google Home, etc.)
 6. Loop prevention (avoid feedback cycles on bridge-routed commands)
 7. Metrics tracking (bridged_endpoints, command_latency)
 
 **Exit Criteria**:
-- ✅ HomeCore device appears in Apple Home as controllable endpoint
-- ✅ Toggle from Apple Home correctly commands HomeCore device
-- ✅ HomeCore state change appears in Apple Home immediately
+- ✅ homeCore device appears in Apple Home as controllable endpoint
+- ✅ Toggle from Apple Home correctly commands homeCore device
+- ✅ homeCore state change appears in Apple Home immediately
 - ✅ No command feedback loops (bridge-origin commands suppressed)
 
 ### Phase 3: Polish & Ops (1-2 weeks)
@@ -630,17 +630,17 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 
 ### 4. **WebSocket Bridge to MQTT**
 - Don't embed MQTT client in plugin (reduces dependencies)
-- Use WebSocket to HomeCore's MQTT broker bridge
-- Simpler auth (leverages HomeCore's token system)
+- Use WebSocket to homeCore's MQTT broker bridge
+- Simpler auth (leverages homeCore's token system)
 - Natural fit for reactive state updates
 
 ### 5. **Deterministic Endpoint IDs**
 - Use salted FNV-1a hash of `{matter_fabric_id}:{homecore_device_id}`
-- Survives HomeCore device rename (ID immutable, name cosmetic)
+- Survives homeCore device rename (ID immutable, name cosmetic)
 - Avoids pairing churn when endpoints reboot
 
 ### 6. **Device Mapper as Stateless Layer**
-- Centralizes HomeCore ↔ Matter type/attribute mapping
+- Centralizes homeCore ↔ Matter type/attribute mapping
 - Versionable independently of controller/bridge
 - Testable with unit tests, no full matter.js runtime needed
 
@@ -653,7 +653,7 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 {
   "name": "hc-matter",
   "version": "1.0.0",
-  "description": "HomeCore Matter Plugin (matter.js based)",
+  "description": "homeCore Matter Plugin (matter.js based)",
   "main": "dist/main.js",
   "type": "module",
   "scripts": {
@@ -705,7 +705,7 @@ plugins/hc-matter/
 - [ ] Implement WebSocket client and MQTT bridge
 - [ ] Add `[[plugins]]` entry to `core/config/homecore.dev.toml`
 - [ ] Wire Matter API routes in `hc-core` (or `hc-api`)
-- [ ] Add Matter WS event types to HomeCore event schema
+- [ ] Add Matter WS event types to homeCore event schema
 - [ ] Update OpenAPI spec (`core/docs/openapi.yaml`) with Matter endpoints
 - [ ] Add hc-tui Manage > Matter admin panel
 - [ ] Create Matter operations guide and troubleshooting docs
@@ -717,19 +717,19 @@ plugins/hc-matter/
 
 **By end of Phase 0**:
 - ✅ matter.js imports cleanly, npm install succeeds
-- ✅ WebSocket handshake works with HomeCore
+- ✅ WebSocket handshake works with homeCore
 - ✅ Simple test confirms state publish and receive
 
 **By end of Phase 1**:
 - ✅ Commission 5+ different Matter device types
-- ✅ Control HomeCore devices from HomeCore API
+- ✅ Control homeCore devices from homeCore API
 - ✅ Plugin survives restarts without losing node inventory
 - ✅ Subscriptions auto-resume after network blip
 
 **By end of Phase 2**:
-- ✅ HomeCore light device appears in Apple Home, fully controllable
-- ✅ HomeCore sensor state syncs bidirectionally with Matter bridge
-- ✅ External controller (Apple/Google/Alexa) commands route to HomeCore
+- ✅ homeCore light device appears in Apple Home, fully controllable
+- ✅ homeCore sensor state syncs bidirectionally with Matter bridge
+- ✅ External controller (Apple/Google/Alexa) commands route to homeCore
 - ✅ No command feedback loops
 
 **By end of Phase 3**:
@@ -746,6 +746,6 @@ plugins/hc-matter/
 - [matter.js Examples](https://github.com/matter-js/matter.js/tree/main/examples)
 - [matter.js Node.js Package](https://github.com/matter-js/matter.js/tree/main/packages/nodejs)
 - [matter.js Node.js Shell](https://github.com/matter-js/matter.js/tree/main/packages/nodejs-shell)
-- [HomeCore Plugin Architecture (AGENTS.md)](../AGENTS.md)
-- [HomeCore MQTT Contract (AGENTS.md)](../AGENTS.md)
+- [homeCore Plugin Architecture (AGENTS.md)](../AGENTS.md)
+- [homeCore MQTT Contract (AGENTS.md)](../AGENTS.md)
 - [Matter Specification](https://buildwithmatter.com)

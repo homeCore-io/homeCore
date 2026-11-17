@@ -1,4 +1,4 @@
-//! Configured-timezone helpers for HomeCore.
+//! Configured-timezone helpers for homeCore.
 //!
 //! Storage stays UTC everywhere. This crate exists for the **display
 //! layer**: log timestamps, console-style API responses, and

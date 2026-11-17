@@ -1,8 +1,8 @@
-# HomeCore configuration file
+# homeCore configuration file
 #
 # BASE DIRECTORY
 # ==============
-# HomeCore uses a single installation directory for all files — config,
+# homeCore uses a single installation directory for all files — config,
 # data, logs, and profiles.  The intended model is:
 #
 #   cd /opt/homecore        (or wherever the package was installed)
@@ -250,7 +250,7 @@ app_name  = "homecore"
 # ---------------------------------------------------------------------------
 # Startup
 #
-# Controls the plugin-ready grace period.  HomeCore waits this many seconds
+# Controls the plugin-ready grace period.  homeCore waits this many seconds
 # after launch before publishing initial mode states (e.g. mode_night).
 # This ensures plugins have time to connect and subscribe to their cmd
 # topics before any rule-triggered commands are sent.
@@ -263,7 +263,7 @@ plugin_ready_delay_secs = 10
 # ---------------------------------------------------------------------------
 # Shutdown
 #
-# drain_timeout_secs: when HomeCore receives SIGTERM or SIGINT it stops
+# drain_timeout_secs: when homeCore receives SIGTERM or SIGINT it stops
 # accepting new events and waits up to this many seconds for any rule action
 # tasks that are currently executing to finish before forcing a stop.
 # Default: 10.
@@ -295,7 +295,7 @@ catchup_window_minutes = 15
 # ---------------------------------------------------------------------------
 # Plugins
 #
-# HomeCore spawns each enabled plugin as a child process and supervises it
+# homeCore spawns each enabled plugin as a child process and supervises it
 # with exponential-backoff restarts (2 s → 4 → 8 → … → 60 s max).
 # Paths may be absolute or relative to base_dir.
 # ---------------------------------------------------------------------------

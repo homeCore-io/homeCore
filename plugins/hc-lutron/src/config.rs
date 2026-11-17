@@ -358,7 +358,7 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
-// HomeCore broker connection
+// homeCore broker connection
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -457,7 +457,7 @@ fn default_reconnect_delay_secs() -> u64 {
 pub enum DeviceKind {
     Dimmer,
     Switch,
-    /// Motorized shade — published as HomeCore `cover`, stubbed for phase 2.
+    /// Motorized shade — published as homeCore `cover`, stubbed for phase 2.
     Shade,
     /// Ceiling fan controller — discrete speeds over the same `#OUTPUT` levels
     /// a dimmer uses. RA2 calls it `CEILING_FAN_TYPE`.
@@ -543,7 +543,7 @@ pub struct DeviceConfig {
 ///   - Enable/Disable: `#TIMECLOCK,{id},6,{event_index},{1=Enable|2=Disable}`
 ///   - Execute (test trigger): `#TIMECLOCK,{id},5,{event_index}`
 ///
-/// HomeCore device ID: `lutron_tc_{timeclock_id}_{event_index}`
+/// homeCore device ID: `lutron_tc_{timeclock_id}_{event_index}`
 /// State published:    `{ "enabled": true|false }`
 /// Commands accepted:  `{ "enable": true|false }`, `{ "execute": true }`
 #[derive(Debug, Clone, Deserialize)]
@@ -555,7 +555,7 @@ pub struct TimeclockConfig {
     pub event_index: u32,
     /// Human-readable name for this timeclock event.
     pub name: String,
-    /// Optional HomeCore area tag.
+    /// Optional homeCore area tag.
     pub area: Option<String>,
 }
 
@@ -580,7 +580,7 @@ pub struct SceneConfig {
 }
 
 impl SceneConfig {
-    /// HomeCore device ID: `lutron_scene_{name_slug}`.
+    /// homeCore device ID: `lutron_scene_{name_slug}`.
     pub fn hc_id(&self) -> String {
         let slug = self
             .name

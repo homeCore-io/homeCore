@@ -1,4 +1,4 @@
-# HomeCore — core CI recipes
+# homeCore — core CI recipes
 
 # Run all CI checks
 check: fmt clippy test

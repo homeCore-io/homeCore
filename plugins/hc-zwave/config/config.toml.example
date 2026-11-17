@@ -6,7 +6,7 @@
 #   - Default WebSocket port is 3000 — check ZwaveJS UI Settings → WS Server
 
 # ---------------------------------------------------------------------------
-# HomeCore broker connection
+# homeCore broker connection
 # ---------------------------------------------------------------------------
 [homecore]
 broker_host = "127.0.0.1"

@@ -267,7 +267,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent(concat!("HomeCore/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("homeCore/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to build shared HTTP client")
     })
@@ -1202,7 +1202,7 @@ fn run_single_action(
                     Some(t) => Some(fill_alert(&t, &ctx).await),
                     None => None,
                 };
-                let title_str = title.as_deref().unwrap_or("HomeCore Alert");
+                let title_str = title.as_deref().unwrap_or("homeCore Alert");
                 debug!(channel, title = title_str, message = %message, "action: Notify");
                 let picture = match &picture_from {
                     Some(device) => fresh_picture(&ctx, device).await,

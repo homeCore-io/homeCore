@@ -1,4 +1,4 @@
-//! Built-in admin UI for HomeCore.
+//! Built-in admin UI for homeCore.
 //!
 //! Serves the pre-built Leptos/WASM application as static files when enabled.
 //! The dist directory is produced by `trunk build --release` in hc-web-leptos.

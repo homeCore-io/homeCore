@@ -668,7 +668,7 @@ pub fn scaled_volumes(volumes: &[u16], target: u16) -> Vec<u16> {
     }
 }
 
-/// Serialise a `SpeakerState` to the HomeCore JSON state schema.
+/// Serialise a `SpeakerState` to the homeCore JSON state schema.
 ///
 /// Every fact is always there — `null` when there is nothing to say — so a
 /// reading never silently disappears from a device.
@@ -897,7 +897,7 @@ async fn play_named(speaker: &Speaker, own_uuid: &str, kind: &str, name: &str) -
 // Command execution
 // ---------------------------------------------------------------------------
 
-/// Execute a HomeCore command on a speaker.
+/// Execute a homeCore command on a speaker.
 ///
 /// `own_uuid` is the speaker's own Sonos UUID — its queue is
 /// `x-rincon-queue:<uuid>#0`, and its inputs are named after it. A `join`'s

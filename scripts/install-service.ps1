@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install HomeCore as a Windows Service.
+    Install homeCore as a Windows Service.
 
 .DESCRIPTION
-    Installs HomeCore as a Windows Service using either NSSM (Non-Sucking
+    Installs homeCore as a Windows Service using either NSSM (Non-Sucking
     Service Manager, recommended) or the built-in sc.exe.
 
-    Plugins are supervised by HomeCore itself, so only the homecore binary
+    Plugins are supervised by homeCore itself, so only the homecore binary
     needs to be registered as a service.
 
     NSSM is strongly preferred: it handles stdout/stderr capture, restart
@@ -19,16 +19,16 @@
     Or via winget:     winget install nssm
 
 .PARAMETER InstallDir
-    HomeCore installation directory.
-    Default: C:\HomeCore
+    homeCore installation directory.
+    Default: C:\homeCore
 
 .PARAMETER ServiceName
     Windows service name.
-    Default: HomeCore
+    Default: homeCore
 
 .PARAMETER DisplayName
     Service display name shown in Services MMC.
-    Default: HomeCore Home Automation Server
+    Default: homeCore Home Automation Server
 
 .PARAMETER RunAs
     Account to run the service under.
@@ -47,7 +47,7 @@
 
 .EXAMPLE
     .\install-service.ps1
-    Installs with all defaults (C:\HomeCore, LocalSystem account).
+    Installs with all defaults (C:\homeCore, LocalSystem account).
 
 .EXAMPLE
     .\install-service.ps1 -InstallDir D:\homecore -RunAs "NT AUTHORITY\NetworkService"
@@ -58,10 +58,10 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$InstallDir   = "C:\HomeCore",
-    [string]$ServiceName  = "HomeCore",
-    [string]$DisplayName  = "HomeCore Home Automation Server",
-    [string]$Description  = "HomeCore home automation platform. Manages protocol plugins and provides REST/WebSocket API.",
+    [string]$InstallDir   = "C:\homeCore",
+    [string]$ServiceName  = "homeCore",
+    [string]$DisplayName  = "homeCore Home Automation Server",
+    [string]$Description  = "homeCore home automation platform. Manages protocol plugins and provides REST/WebSocket API.",
     [string]$RunAs        = "LocalSystem",
     [switch]$UseNssm,
     [switch]$Uninstall,
@@ -156,7 +156,7 @@ if ($Uninstall) {
 # ---------------------------------------------------------------------------
 Require-Admin
 
-Write-Step "Installing HomeCore Windows Service"
+Write-Step "Installing homeCore Windows Service"
 Write-Info "Install dir  : $InstallDir"
 Write-Info "Binary       : $BinaryPath"
 Write-Info "Config       : $ConfigPath"

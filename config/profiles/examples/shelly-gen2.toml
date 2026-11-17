@@ -1,4 +1,4 @@
-# HomeCore Ecosystem Profile — Shelly Gen2 / Gen3
+# homeCore Ecosystem Profile — Shelly Gen2 / Gen3
 #
 # Covers ALL Shelly Plus, Pro, and Mini series devices (Gen2 and Gen3).
 # Gen3 uses the identical MQTT/RPC protocol as Gen2 — no differences at
@@ -20,7 +20,7 @@
 #   Announce: {device}/announce                    (informational)
 #   Online:   {device}/online                     "true"/"false"
 #
-# ─── HomeCore Device IDs ──────────────────────────────────────────────────────
+# ─── homeCore Device IDs ──────────────────────────────────────────────────────
 #   Switch components:     shelly_{device}_switch_{id}
 #   Light/Dimmer:          shelly_{device}_light_{id}
 #   Cover/Roller:          shelly_{device}_cover_{id}
@@ -30,14 +30,14 @@
 #   Voltmeter (Uni):       shelly_{device}_voltmeter_{id}
 #   Availability:          shelly_{device}  (physical device)
 #
-# ─── Command payloads (HomeCore → device) ─────────────────────────────────────
+# ─── Command payloads (homeCore → device) ─────────────────────────────────────
 #   Switch / Plug:  {"on": true}  or  {"on": false}
 #   Dimmer / Light: {"on": true, "brightness_pct": 75}
 #   Cover:          {"position": 50}  (0=fully closed, 100=fully open)
 #                   Send {"position": 100} to fully open, {"position": 0} to close.
 #
 # ─── Command format sent to device ────────────────────────────────────────────
-#   All commands are wrapped in a JSON-RPC envelope by the HomeCore router:
+#   All commands are wrapped in a JSON-RPC envelope by the homeCore router:
 #   {
 #     "id": 1,
 #     "src": "homecore",
@@ -110,7 +110,7 @@ device_id = "shelly_{device}_switch_{switch_id}"
 
 # ─── Switch commands ──────────────────────────────────────────────────────────
 # RPC: Switch.Set  params: {"id": <N>, "on": true/false}
-# HomeCore sends: {"on": true}  or  {"on": false}
+# homeCore sends: {"on": true}  or  {"on": false}
 # The router wraps this in the RPC envelope and adds "id" from rpc_id.
 
 [[ecosystem.cmd_topics]]
@@ -120,7 +120,7 @@ rpc_method = "Switch.Set"
 rpc_id     = 0
 
   [ecosystem.cmd_topics.field_map]
-  on = "on"    # HomeCore "on" → RPC params "on" (bool, unchanged)
+  on = "on"    # homeCore "on" → RPC params "on" (bool, unchanged)
 
 [[ecosystem.cmd_topics]]
 source     = "homecore/devices/shelly_{device}_switch_1/cmd"
@@ -177,7 +177,7 @@ device_id = "shelly_{device}_light_{light_id}"
 
 # ─── Dimmer commands ──────────────────────────────────────────────────────────
 # RPC: Light.Set  params: {"id": 0, "on": true, "brightness": 75}
-# HomeCore sends: {"on": true, "brightness_pct": 75}
+# homeCore sends: {"on": true, "brightness_pct": 75}
 
 [[ecosystem.cmd_topics]]
 source     = "homecore/devices/shelly_{device}_light_0/cmd"
@@ -232,13 +232,13 @@ device_id = "shelly_{device}_cover_{cover_id}"
 
 # ─── Cover commands ────────────────────────────────────────────────────────────
 # RPC: Cover.GoToPosition  params: {"id": 0, "pos": 50}
-# HomeCore sends: {"position": 50}
+# homeCore sends: {"position": 50}
 # To OPEN:  send {"position": 100}
 # To CLOSE: send {"position": 0}
 # To STOP:  send {"position": -1} — see note below
 #
 # Note: Cover.Stop is a separate RPC method. For stop support, use a rule
-# that sends {"position": -1} or create a separate HomeCore action calling
+# that sends {"position": -1} or create a separate homeCore action calling
 # the REST /rpc endpoint directly.
 
 [[ecosystem.cmd_topics]]
@@ -248,7 +248,7 @@ rpc_method = "Cover.GoToPosition"
 rpc_id     = 0
 
   [ecosystem.cmd_topics.field_map]
-  position = "pos"    # HomeCore "position" → RPC params "pos"
+  position = "pos"    # homeCore "position" → RPC params "pos"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -258,7 +258,7 @@ rpc_id     = 0
 # Temperature status: {"id":0,"tC":24.4,"tF":75.9,"errors":[]}
 # Humidity status:    {"id":0,"rh":55.2,"errors":[]}
 #
-# Both components from Plus HT map to the SAME HomeCore device via partial
+# Both components from Plus HT map to the SAME homeCore device via partial
 # updates, so the device ends up with both "temperature" and "humidity" attrs.
 # ═══════════════════════════════════════════════════════════════════════════════
 

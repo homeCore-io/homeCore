@@ -29,7 +29,7 @@ resync_interval_secs = 60
 # Plugin heartbeat/status publish cadence.
 heartbeat_secs = 30
 # When true, collapse Hue sensor/support facets onto the owning physical device
-# where possible so motion sensors do not appear as multiple HomeCore devices.
+# where possible so motion sensors do not appear as multiple homeCore devices.
 compact_motion_facets = true
 # When true, publish Hue room/zone grouped-light resources as standalone devices.
 publish_grouped_lights = false

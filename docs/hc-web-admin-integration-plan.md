@@ -1,8 +1,8 @@
-# HomeCore `hc-web-admin` Integration Plan
+# homeCore `hc-web-admin` Integration Plan
 
 Status: Draft, living document
 Last Updated: 2026-04-02
-Scope: Fold `hc-web-leptos` into the `core` workspace as an internal HomeCore admin UI without reducing external client or API functionality and without degrading core performance or reliability.
+Scope: Fold `hc-web-leptos` into the `core` workspace as an internal homeCore admin UI without reducing external client or API functionality and without degrading core performance or reliability.
 
 ## Architectural Note
 
@@ -12,9 +12,9 @@ That means the current integration direction in this document is not an approved
 
 ## Intent
 
-HomeCore should gain an internal Rust-native administrative web surface that is built, shipped, and versioned with `core`.
+homeCore should gain an internal Rust-native administrative web surface that is built, shipped, and versioned with `core`.
 
-This is not a plan to replace the external HTTP API or to turn the browser into a privileged bypass around HomeCore internals. The goal is to remove the current repo and process split between `core` and `hc-web-leptos`, while preserving the existing external integration model for:
+This is not a plan to replace the external HTTP API or to turn the browser into a privileged bypass around homeCore internals. The goal is to remove the current repo and process split between `core` and `hc-web-leptos`, while preserving the existing external integration model for:
 
 - `hc-tui`
 - `hc-mcp`
@@ -22,7 +22,7 @@ This is not a plan to replace the external HTTP API or to turn the browser into 
 - automation tooling
 - future third-party API consumers
 
-The integrated web app should be treated as a first-party operator UI built on top of HomeCore services, not as a reason to weaken separation, observability, or runtime safety.
+The integrated web app should be treated as a first-party operator UI built on top of homeCore services, not as a reason to weaken separation, observability, or runtime safety.
 
 ## Non-Negotiable Invariants
 
@@ -42,7 +42,7 @@ Today:
 - `clients/hc-web-leptos` is a standalone CSR Leptos app.
 - It uses duplicated client-side models that mirror `hc-types`.
 - It uses a handwritten REST client layer against `/api/v1`.
-- It uses the existing HomeCore WebSocket event stream for live updates.
+- It uses the existing homeCore WebSocket event stream for live updates.
 - It is developed and bundled separately via Trunk.
 - It is operationally external to the `core` workspace.
 
@@ -52,7 +52,7 @@ This gives fast UI iteration, but it creates avoidable duplication and drift:
 - duplicated auth handling
 - duplicated query shapes
 - separate build and release path
-- no SSR or server-side access to HomeCore state/services
+- no SSR or server-side access to homeCore state/services
 
 ## Target Architecture
 
@@ -96,7 +96,7 @@ Initial page loads and admin mutations should move toward Leptos server function
 
 ### 5. Keep live updates on the existing event model first
 
-Do not redesign the event bus contract as part of phase one. Reuse the existing HomeCore event stream, then tighten admin-specific subscriptions after parity is established.
+Do not redesign the event bus contract as part of phase one. Reuse the existing homeCore event stream, then tighten admin-specific subscriptions after parity is established.
 
 ### 6. Move browser auth to secure cookie-backed sessions
 
@@ -231,15 +231,15 @@ Success criteria:
 - `hc-web-admin` no longer mirrors core device and event models
 - API and UI use the same source-of-truth types where appropriate
 
-## Phase 3: Mount `hc-web-admin` from HomeCore
+## Phase 3: Mount `hc-web-admin` from homeCore
 
 Goal:
-Serve the admin UI from the main HomeCore HTTP server.
+Serve the admin UI from the main homeCore HTTP server.
 
 Deliverables:
 
 - add top-level axum mounting for admin routes
-- serve static assets from HomeCore
+- serve static assets from homeCore
 - keep `/api/v1` namespaced and unchanged
 - define admin route namespace:
   - preferred: `/`
@@ -413,7 +413,7 @@ These need explicit decisions before implementation gets deep:
 
 1. Create `core/crates/hc-web-admin` as a workspace member.
 2. Make it build with shared `hc-types` instead of mirrored models.
-3. Add a non-default feature-gated mount in the HomeCore router for integrated admin serving.
+3. Add a non-default feature-gated mount in the homeCore router for integrated admin serving.
 4. Establish baseline startup, memory, and shutdown metrics before enabling it by default.
 5. Migrate the devices list and device detail pages first.
 

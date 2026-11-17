@@ -1,4 +1,4 @@
-# HomeCore Automation Rules Guide
+# homeCore Automation Rules Guide
 
 Rules are RON (Rusty Object Notation) files stored in the `rules/` directory.
 Each `.ron` file is one rule. The filename stem is the rule's slug. Changes
@@ -371,7 +371,7 @@ title   = "Security Alert"
 message = "Back door opened at an unusual hour"
 ```
 
-`title` defaults to `"HomeCore Alert"` if omitted. Channels are configured
+`title` defaults to `"homeCore Alert"` if omitted. Channels are configured
 in `[notify]` in `homecore.toml`.
 
 ---
@@ -712,7 +712,7 @@ script = """
 
 ## Virtual Devices
 
-HomeCore provides two built-in virtual device types — **timers** and **switches** — that
+homeCore provides two built-in virtual device types — **timers** and **switches** — that
 live in the state store like any plugin device and integrate with the rule engine through
 the same trigger/condition/action primitives.
 

@@ -40,9 +40,9 @@ async fn main() {
     if !cfg.hue.compact_motion_facets {
         warn!(
             "compact_motion_facets = false: each Hue motion/temperature/light_level \
-             service will register as a separate HomeCore device. Set this to true \
+             service will register as a separate homeCore device. Set this to true \
              (the default) to merge all sensors on one physical device into one \
-             HomeCore device with multi-facet attributes."
+             homeCore device with multi-facet attributes."
         );
     }
 
@@ -290,7 +290,7 @@ async fn try_start(
 
     info!(
         count = bridges.len(),
-        "Hue bridges registered with HomeCore"
+        "Hue bridges registered with homeCore"
     );
 
     let bridge_runtime = Bridge::new(

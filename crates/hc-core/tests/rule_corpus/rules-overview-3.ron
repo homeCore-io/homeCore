@@ -1,5 +1,5 @@
 Rule(
-    id: "00000000-0000-0000-0000-000000000000",  // all zeros: HomeCore assigns a real ID on first load
+    id: "00000000-0000-0000-0000-000000000000",  // all zeros: homeCore assigns a real ID on first load
     name: "Front door alert",
     enabled: true,
     priority: 10,          // higher runs first
