@@ -185,9 +185,21 @@ not `with_custom_handler`, which must not block.
   `household_member`, `read_only`, ...); `uid` is null for the local
   transports and for a plugin's own key. Core drops any `caller` the client
   sent, so trust it. For a key, judge by `scopes`, not `role`. Do for a
-  caller only what their scopes allow.
+  caller only what their scopes allow. Reading it, per SDK:
+  - Rust: `Caller::from_cmd(cmd)` in a custom or async handler, and
+    `ctx.caller()` in a streaming action (the SDK takes it out of the params).
+  - Python: add a `caller` keyword to `on_action` (`def on_action(self,
+    action, params, ctx=None, caller=None)`); a streaming action reads
+    `ctx.caller`.
+  - Node.js: the fourth argument of `onAction(action, params, ctx, caller)`,
+    and `ctx.caller`.
+  - .NET: set `OnActionWithCaller` (its last argument is a `Caller`), and
+    `StreamContext.Caller`.
 - **Who may call.** `requires_role: signed_in` opens an action to every
-  signed-in person or key, a household member included. It is opt-in: use it
+  signed-in person or key, a household member included. It is spelled
+  `RequiresRole::SignedIn` in Rust (and `device_actions::Role::SignedIn` on a
+  device action), `RequiresRole.SIGNED_IN` in Python and Node.js, and
+  `RequiresRole.SignedIn` in .NET. It is opt-in: use it
   only for an action that is safe for anyone in the house, or that limits
   itself by `caller`. Everything else needs `plugins:write` on `command`:
   `user` (the default), `read_only`, and an action left off the manifest;
@@ -203,6 +215,21 @@ not `with_custom_handler`, which must not block.
   key is deleted when the plugin is uninstalled. A plugin that does not
   answer `api_access` has its key deleted. The key shows in the API keys list
   as `plugin <id>`, and in the audit log as `api_key:plugin <id>`.
+
+  Every SDK answers `api_access` itself (a missing `url` or `key` is answered
+  with the error `api_access needs a url and a key`) and keeps the grant, its
+  key hidden from logs:
+
+  | | Ask for scopes | Read the grant | Wait for it | Hear each new one |
+  |---|---|---|---|---|
+  | Rust (0.6.5) | `Capabilities { api_scopes, .. }` | `mgmt.api_access()` | `mgmt.wait_for_api_access(timeout)` | `with_api_access_handler`, `api_access_updates()` |
+  | Python (0.5.5) | `Capabilities(api_scopes=[...])` | `self.api_access` | `wait_for_api_access(timeout)` | override `on_api_access(url, key, scopes)` |
+  | Node.js | `new Capabilities({ apiScopes })` | `this.apiAccess` | `waitForApiAccess(timeoutMs)` | override `onApiAccess(url, key, scopes)` |
+  | .NET | `Capabilities.ApiScopes` | `client.ApiAccess` | `WaitForApiAccessAsync(...)` | `OnApiAccess` |
+
+  In Rust, a plugin that answered `api_access` from its own custom or async
+  handler before 0.6.5 keeps working: the SDK keeps the grant first, and that
+  handler's reply is what core gets.
 
 ## 6. Settings
 
@@ -241,6 +268,7 @@ A plugin can carry web components that the web app puts in its place:
 | `look.drawing` | how a family of things is drawn, in a look that chooses it | `host`, `thing`, `deviceId` |
 | `look.piece` | a piece of a page's frame: a room's header, a display's rest view | `host`, `room` or `things` |
 | `look.symbol` | symbols a person can give any device | `host`, `name` |
+| `app.assistant` | a helper anyone signed in can open from any page | `host`, `mode` |
 
 homeCore passes each slot to the app as you wrote it, unknown fields included,
 and checks only that its `slot` is a dotted lowercase name and its elements
@@ -282,6 +310,16 @@ to the app at `GET /plugins/{id}/ui/{build}/{file}` and keeps none; the browser
 caches each build for good. A stopped plugin offers no screens; the app falls
 back to its generic ones whenever a plugin's screen is missing or won't load.
 
+**`app.assistant`** (`{ "slot": "app.assistant", "element": "…", "label":
+"Ask" }`) puts a button with its `label` in the app's top bar. It opens the
+element in a panel at the right, beside the page on a wide screen (440 px), and
+as a page of its own (`/ask`) on a phone; `mode` says which (`panel` or
+`page`). The element draws all of the inside, its header and its way to close
+included. The app closes it on a `close` event (on a page, that goes back), or
+when Escape is pressed inside it and the element did not `preventDefault` the
+key. One plugin's at a time: the first running plugin that offers the slot.
+hc-mcp (the Assistant) is the example. It needs the app after 0.1.73.
+
 ### Pictures the plugin keeps
 
 Pictures fetched from devices while the plugin runs (hc-roku's channel icons)
@@ -306,13 +344,27 @@ Every element gets a `host` (types: `sdk/ui/index.d.ts`), scoped to the plugin:
 - `store` — JSON documents the web app keeps for its screens (≤ 2 MiB each);
 - `fetch(path)` — homeCore's API as the viewer, for the rest;
 - `fileUrl(path)` — where a picture the plugin keeps while it runs is (below);
+- `stream(action, params, onEvent)`: runs one of its streaming actions and
+  follows it: `onEvent` gets `started` (with the run's `request_id`), then
+  each event the plugin sends (`progress`, `item`, `warning`,
+  `awaiting_user`, …, with any `data` it attaches), then the one that ends
+  it. The handle it returns has `requestId`, `cancel()` and `done`, which
+  resolves with the last event (`complete`, `error`, `canceled`, `timeout`
+  or `busy`) and never rejects;
+- `respond(requestId, response)`: answers a run's `awaiting_user` question in
+  the shape its `response_schema` asks for;
+- `user`: who is using it as homeCore names them (`username`, `role`);
 - `ui` — the app's `confirm`, `openDevice`, `navigate`;
-- `me` — who is using it (`can(scope)`, `isAdmin`);
+- `me` — who is using it (`can(scope)`, `isAdmin`); decide what to offer with
+  `can`, never the role;
 - `theme.sheet` — the app's parts as a stylesheet, to adopt into the shadow
   root: `hc-card`, `hc-pill`, `hc-field`, `hc-table`, `hc-tag`, `hc-dot`, and
   for cards `hc-tile` (+ `compact`, `lit`) with `hc-tile-name`/`hc-tile-state`
   — the app's own card frame. Colours and type are CSS custom properties,
   which reach into a shadow root, so screens follow light, dark and themes.
+
+`stream`, `respond` and `user` are absent before the app after 0.1.73; check
+`typeof host.stream === 'function'`.
 
 A screen runs **inside the app, as the person using it**: full trust, as the
 plugin's own program already has. Everything on `host` is still scoped to the
@@ -489,20 +541,37 @@ point — not the SDKs, which pass slots through.
   Commit `ui/package-lock.json` (the repo ignores lockfiles elsewhere — add
   `!package-lock.json` to the UI's `.gitignore`), and mind that the repo also
   ignores folders named `rules/`.
-- **Release a plugin**: bump `version` in its `Cargo.toml`, merge `develop` to
-  `main`, wait for CI to pass, then push one tag, `hc-<name>-v<version>`. The
-  shared workflow (`hc-scripts/.github/workflows/rust-release.yml`) builds the
-  static binary, builds `ui/` if it has `package.json`, packs
-  `plugin.toml` + binary + `ui/` (`ui = "ui"`) into a signed `.tar.zst`,
-  attaches it to the GitHub Release and notifies the registry. homeCore installs
-  the package — the UI with it — from **Plugins → Catalog / Update**.
+- **Release a Rust plugin**: bump `version` in its `Cargo.toml`, merge
+  `develop` to `main`, wait for CI to pass, then push one tag,
+  `hc-<name>-v<version>`. The shared workflow
+  (`hc-scripts/.github/workflows/rust-release.yml`) builds the static binary,
+  builds `ui/` if it has `package.json`, packs `plugin.toml` + binary + the
+  built `ui/` (`ui = "ui"`) into a `.tar.zst`, attaches it to the GitHub
+  Release and notifies the registry. homeCore installs the package, the UI
+  with it, from the Catalog (**Settings › Plugins › Catalog**), and updates it
+  there.
+- **The plugin's id comes from its binary name**: `hc-<name>` becomes
+  `plugin.<name>` (`hc-wled` is `plugin.wled`). Name the binary for the id you
+  want; the id the plugin uses on MQTT must match it.
 - **How it shows in the Catalog**: `package.description` is the line under
   its name, and `[package.metadata.homecore]` holds `name` (as people see it)
-  and `category` (Lighting, Climate, Media, Hubs, Weather, or a new
+  and `category` (Lighting, Climate, Media, Hubs, Weather, Tools, or a new
   one), which the Catalog groups by.
+- **What is signed.** The registry's `index.json` is signed with ed25519, and
+  homeCore checks that signature against `[registry] public_key`. Each entry
+  pins its artifact by `sha256`, which homeCore checks after downloading.
+  The artifacts themselves are not signed.
+- **Getting listed.** Only the homeCore maintainers can add a plugin to the
+  official registry (`homeCore-io/registry`): a release notifies it with a
+  `repository_dispatch` that needs an organization token, or a maintainer
+  runs its "Publish plugin to registry" workflow by hand with the artifact's
+  URL and `sha256`. An outside author opens an issue or a pull request on
+  `homeCore-io/registry` with the plugin's repository and a release whose
+  assets hold the artifact. Anyone can run a registry of their own: point
+  `[registry] url` and `public_key` at it.
 - A core release that changes plugins tags them on the same commit, and gets
-  its entry in `homeCore-io.github.io/docs/release-notes.md` — written for the
-  people running a house. See the workspace `AGENTS.md`.
+  its entry in `homeCore-io.github.io/docs/release-notes.md`, written for the
+  people running a house.
 - **Compatibility**: an older homeCore ignores slots and fields it doesn't know;
   an older app shows generic screens; a plugin built on an older SDK can still
   offer newer slots (the SDKs pass slots through). Say in the release notes when
@@ -523,9 +592,77 @@ point — not the SDKs, which pass slots through.
 | Other devices' schemas (`subscribe_schema`) | ✓ | — | — | — |
 | Devices offline on SIGTERM, with a stop hook | ✓ | ✓ | ✓ | ✓ |
 
+| Caller, `requires_role` signed_in | ✓ | ✓ | ✓ | ✓ |
+| Own REST access (`api_scopes`, `api_access`) | ✓ | ✓ | ✓ | ✓ |
+| Released to the Catalog | ✓ | ✓ | — | — |
+
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
-GitHub Release; none is on a package registry yet (see
-`claude-notes/plans/public_announcement.md`).
+GitHub Release. Nothing is published to npm, crates.io, PyPI or NuGet yet;
+install SDKs from their GitHub tags.
+
+**Node.js and .NET plugins have no release path to the Catalog yet**: there is
+no release workflow for them and no plugin runtime that runs them. They run as
+`[[plugins]]` entries on the homeCore host, which starts and supervises them
+like any other plugin. An entry has a `binary` and a `config` and no
+arguments, so `binary` must be an executable: a .NET single-file publish, or
+a small script that runs `node` on the plugin.
+
+### Packaging a Python plugin
+
+A Python plugin is released to the Catalog as a hermetic artifact (the plugin,
+the SDK and every dependency as wheels) that a Python plugin runtime installs
+offline. `clients/hc-mcp` (the Assistant) is the example. Its
+`pyproject.toml` carries:
+
+```toml
+[project]
+name = "hc-mcp"
+version = "0.1.3"
+description = "..."        # the line under its name in the Catalog
+dependencies = [
+    "homecore-plugin-sdk>=0.5.5",   # required: the runtime installs only what you declare
+    # ...
+]
+
+[tool.uv.sources]
+homecore-plugin-sdk = { git = "https://github.com/homeCore-io/hc-plugin-sdk-py", tag = "v0.5.5" }
+
+# The plugin's own screens ship inside the wheel, where the SDK's
+# ui.find_dir looks for them.
+[tool.hatch.build.targets.wheel.force-include]
+"ui" = "hc_mcp/ui"
+
+[tool.homecore]
+id = "plugin.mcp"          # required
+entrypoint = "hc_mcp.plugin"   # required: the module the runtime runs
+name = "Assistant"         # the Catalog's display name (the id when absent)
+category = "Tools"         # where the Catalog groups it
+```
+
+- **The SDK dependency** must be listed, pinned to a tag (the SDK is on no
+  package index). A plugin that imports the SDK without declaring it is
+  refused at build time.
+- **Screens**: where a Rust plugin's release packs `ui/` into the tarball, a
+  Python plugin bundles its built `ui/` inside the wheel.
+- **Releasing**: a workflow in the plugin's repo, triggered by a tag, calls
+  `homeCore-io/hc-scripts/.github/workflows/python-release.yml` with
+  `plugin_dir` and `sdk_ref` (the SDK tag built into the artifact, which
+  should match the pin above):
+
+  ```yaml
+  jobs:
+    release:
+      uses: homeCore-io/hc-scripts/.github/workflows/python-release.yml@main
+      with:
+        plugin_dir: .
+        sdk_ref: v0.5.5
+      secrets: inherit
+  ```
+
+  It runs `hc-scripts/build-python-artifact.sh` (for x86_64 and aarch64, on
+  the target Python), installs the artifact offline and starts it against a
+  broker as a release gate (on x86_64), attaches it to the GitHub Release, and notifies
+  the registry. Both scripts run on a laptop too.
 
 ## 12. Before you call a plugin done
 
