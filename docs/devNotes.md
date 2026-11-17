@@ -14,14 +14,28 @@ This is the standard workflow for spinning up the full system and interacting wi
 
 ### Terminal 1 — the server
 
+**Don't run plain `cargo run -p homecore` from this repo's root.** HomeCore uses
+the current working directory as its base, so from `core/` it loads
+`config/homecore.toml`, which declares real plugins (`[[plugins]]` for YoLink,
+Lutron, Sonos and Z-Wave) whose configs, when present under `plugins/*/config/`,
+point at real hubs and cloud accounts. Develop against a throwaway home with a
+config of its own:
+
 ```sh
-cargo run -p homecore
+mkdir -p /tmp/hc-dev/config
+printf '[server]\nhost = "127.0.0.1"\nport = 8080\n\n[broker]\nhost = "127.0.0.1"\nport = 1883\n' \
+  > /tmp/hc-dev/config/homecore.toml
+cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
-HomeCore uses the **current working directory** as its base.  Running from the
-workspace root (which contains `config/`) means it picks up `config/homecore.toml`
-and writes data to `data/` and logs to `logs/` right there — no hidden directories,
-everything visible alongside the source.
+The `[broker] host = "127.0.0.1"` line is not optional. With no config at all,
+the broker binds `0.0.0.0`, and core refuses to start an embedded broker on a
+non-loopback address with no `[[broker.clients]]` credentials (the startup
+check in `hc-broker`; `HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1` overrides it, which
+you don't want here). Change the ports if another homeCore is already running
+on this machine.
+
+Core writes data to `/tmp/hc-dev/data/` and logs to `/tmp/hc-dev/logs/`.
 
 On first run it creates any missing subdirectories and prints a temporary admin
 password.  Watch for two things:
@@ -31,7 +45,7 @@ password.  Watch for two things:
 
 Leave this running. Server logs appear here as you interact with the API.
 
-To restart after making code changes: press `Ctrl-C`, then `cargo run -p homecore` again.
+To restart after making code changes: press `Ctrl-C`, then run the same command again.
 State persists across restarts unless you wipe the data directory (see "Resetting" below).
 
 **Run from a specific installation directory:**
@@ -44,7 +58,8 @@ HOMECORE_HOME=/opt/homecore /opt/homecore/bin/homecore
 homecore --home /opt/homecore
 ```
 
-**Throwaway state during development:**
+**Throwaway state during development** (`HOMECORE_HOME` does what `--home`
+does; either needs the config above):
 
 ```sh
 HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
@@ -52,25 +67,29 @@ HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
 cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
-**Custom config file only** (keep current directory as base):
+**Another config file** (same base directory):
 
 ```sh
-cargo run -p homecore -- --config /path/to/custom.toml
+cargo run -p homecore -- --home /tmp/hc-dev --config /path/to/custom.toml
 # or
-HOMECORE_CONFIG=/path/to/custom.toml cargo run -p homecore
+HOMECORE_CONFIG=/path/to/custom.toml cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
 ---
 
-### Terminal 2 — the virtual device
+### Terminal 2: a plugin with a stand-in device
 
-Start this after the server is up:
+Start this after the server is up. The template plugin registers a light that
+exists only in the plugin, so nothing real is touched:
 
 ```sh
-cargo run -p virtual-device -- --broker 127.0.0.1 --port 1883 --id plugin.virtual
+cp plugins/hc-plugin-template/config/config.toml.example /tmp/hc-dev/template.toml
+cargo run -p hc-plugin-template -- /tmp/hc-dev/template.toml
 ```
 
-You should see it connect and register. Leave it running. Press `Ctrl-C` to disconnect it.
+You should see it connect and register `template_light_1`. Leave it running.
+Press `Ctrl-C` to stop it; its device goes offline. `plugins/hc-captest` is
+the other plugin that needs no hardware: one capability action of each kind.
 
 ---
 
@@ -139,7 +158,7 @@ See **Event stream reference** below for the full list of event types and their 
 
 1. Make a code change in your editor
 2. Press `Ctrl-C` in Terminal 1 to stop the server
-3. `cargo run -p homecore` to recompile and restart (changed crates only recompile)
+3. `cargo run -p homecore -- --home /tmp/hc-dev` to recompile and restart (changed crates only recompile)
 4. Re-login in Terminal 3 if your token expired (tokens survive server restarts if you kept the same `jwt_secret`)
 5. Test the change with `curl` in Terminal 3
 6. Check Terminal 1 logs for any errors or tracing output
@@ -153,19 +172,13 @@ If you only changed a library crate and want to verify it compiles before restar
 
 ```sh
 # Stop the server (Ctrl-C in Terminal 1)
-# Stop the virtual device (Ctrl-C in Terminal 2)
+# Stop the plugin (Ctrl-C in Terminal 2)
 
 # Wipe all state (device registry, rules, users, history)
-rm -rf data/
-
-# Restart from the workspace root — a new admin password will be printed
-cargo run -p homecore
-```
-
-Or if you used a custom home directory:
-```sh
 rm -rf /tmp/hc-dev/data
-HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
+
+# Restart: a new admin password will be printed
+cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
 ---
@@ -175,23 +188,32 @@ HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
 Understanding the dependency chain matters when you change a lower crate — everything above it needs a recompile.
 
 ```
-hc-types          ← shared types only, no logic, no deps on other hc-* crates
-  └── hc-auth     ← JWT, passwords, user model
-  └── hc-broker   ← embedded MQTT broker
-  └── hc-state    ← redb device registry + SQLite history
-  └── hc-scripting← Rhai runtime
-  └── hc-topic-map← topic translation + transforms
-      └── hc-mqtt-client  ← MQTT client, publishes to event bus
-          └── hc-core     ← rule engine, scheduler, state bridge
-              └── hc-api  ← axum HTTP/WS server
-                  └── homecore (binary)  ← wires everything together
+crate            depends on (hc-* only)
+hc-types         nothing; also hc-time, hc-notify, hc-web-admin
+hc-auth          hc-types (JWT, passwords, users)
+hc-broker        hc-types (embedded MQTT broker)
+hc-mqtt-client   hc-types
+hc-topic-map     hc-types
+hc-influx        hc-types
+hc-logging       hc-types, hc-time
+hc-scripting     hc-types, hc-time (Rhai runtime)
+hc-state         hc-types, hc-auth (redb registry, SQLite history)
+hc-api-types     hc-auth
+hc-config        hc-types, hc-influx, hc-logging, hc-notify
+hc-core          hc-types, hc-time, hc-notify, hc-scripting, hc-state,
+                 hc-topic-map, hc-mqtt-client (rules, scheduler, state bridge)
+hc-api           hc-core and most of the above, plus hc-config,
+                 hc-api-types, hc-web-admin (axum HTTP/WS server)
+hc-cli           hc-auth, hc-api-types
+homecore         the server binary: wires everything together
 
-plugins/plugin-sdk-rs  ← depends on rumqttc only, no hc-* deps
-plugins/examples/virtual-device  ← depends on plugin-sdk-rs
-plugins/examples/http-poller     ← depends on plugin-sdk-rs
+sdk/rust         (crate plugin-sdk-rs) hc-types, hc-logging, hc-time
+plugins/hc-*     plugin-sdk-rs (every Rust plugin)
 ```
 
-**Rule of thumb:** if you only change `hc-api`, only `hc-api` and `homecore` recompile. If you change `hc-types`, everything recompiles.
+`cargo metadata --no-deps --format-version 1` gives the current list.
+
+**Rule of thumb:** if you only change `hc-api`, only `hc-api` and `homecore` recompile. If you change `hc-types`, everything recompiles, the SDK and every plugin included.
 
 ## Current integration notes
 
@@ -219,17 +241,14 @@ cargo check -p hc-core
 # Build without running
 cargo build --workspace
 
-# Run the server (debug mode — slower binary, faster compile)
-cargo run -p homecore
+# Run the server against a throwaway home (debug: slower binary, faster compile)
+cargo run -p homecore -- --home /tmp/hc-dev
 
-# Run the server (release mode — faster binary, slow compile, use for perf testing)
-cargo run -p homecore --release
+# Run the server (release: faster binary, slow compile, use for perf testing)
+cargo run -p homecore --release -- --home /tmp/hc-dev
 
-# Run the virtual device
-cargo run -p virtual-device -- --broker 127.0.0.1 --port 1883 --id plugin.virtual
-
-# Run the http-poller (requires a config file — see http-poller.example.toml)
-cargo run -p http-poller -- --config plugins/examples/http-poller/http-poller.toml
+# Run a plugin with no hardware behind it
+cargo run -p hc-plugin-template -- /tmp/hc-dev/template.toml
 ```
 
 ---
@@ -245,7 +264,8 @@ cargo test -p hc-auth
 cargo test -p hc-core
 cargo test -p hc-api
 cargo test -p hc-topic-map
-cargo test -p http-poller
+cargo test -p plugin-sdk-rs
+cargo test -p hc-wled
 
 # Run a specific test by name (partial match works)
 cargo test -p hc-core repeat_until
@@ -264,19 +284,8 @@ cargo test -p hc-core -- --nocapture
 cargo test --workspace -- --test-threads=1
 ```
 
-### Current test counts by crate
-
-| Crate | Tests | What they cover |
-|---|---|---|
-| `hc-auth` | 11 | Password hashing (5), JWT issue/validate/expire/tamper/role (6) |
-| `hc-core` | 12 | Rule engine trigger matching (4), executor RepeatUntil/Delay (3), CallService (5) |
-| `hc-api` | 22 | Event log ring buffer (8), WebSocket auth (7), scope enforcement (7) |
-| `hc-notify` | 0 | (providers tested via real SMTP/Pushover; unit tests require network mocking) |
-| `hc-topic-map` | 4 | Pattern matching and transforms |
-| `http-poller` | 19 | Path extraction (6), field_map (2), JSON↔Dynamic bridge (7), Rhai transform (4) |
-| `homecore` (integration) | 1 | Full stack: virtual device → MQTT → rule fires → command |
-
-Total: **69 tests**
+`cargo test --workspace` covers the server, every crate, the Rust SDK and
+every Rust plugin.
 
 ---
 
@@ -316,22 +325,22 @@ The fastest way during development is the `RUST_LOG` environment variable (takes
 
 ```sh
 # Default: info and above from all crates
-cargo run -p homecore
+cargo run -p homecore -- --home /tmp/hc-dev
 
 # Debug from the rule engine only, info everywhere else
-RUST_LOG=info,hc_core=debug cargo run -p homecore
+RUST_LOG=info,hc_core=debug cargo run -p homecore -- --home /tmp/hc-dev
 
 # Debug from multiple crates
-RUST_LOG=info,hc_core=debug,hc_mqtt_client=debug cargo run -p homecore
+RUST_LOG=info,hc_core=debug,hc_mqtt_client=debug cargo run -p homecore -- --home /tmp/hc-dev
 
 # Everything (very noisy — includes MQTT frame-level and broker internals)
-RUST_LOG=trace cargo run -p homecore
+RUST_LOG=trace cargo run -p homecore -- --home /tmp/hc-dev
 
 # Silence everything except errors
-RUST_LOG=error cargo run -p homecore
+RUST_LOG=error cargo run -p homecore -- --home /tmp/hc-dev
 
 # Rule engine internals specifically
-RUST_LOG=info,hc_core::engine=debug,hc_core::executor=debug cargo run -p homecore
+RUST_LOG=info,hc_core::engine=debug,hc_core::executor=debug cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
 For a persistent change that survives restarts without setting env vars, use `[logging.targets]` in `homecore.toml` (see below).
@@ -891,10 +900,10 @@ allow_pub = ["homecore/devices/zigbee_+/state", "homecore/plugins/zigbee/+"]
 allow_sub = ["homecore/devices/zigbee_+/cmd"]
 
 [[broker.clients]]
-id       = "plugin.http-poller"
-password = "poller-password"
-allow_pub = ["homecore/devices/+/state", "homecore/plugins/http-poller/+"]
-allow_sub = []
+id       = "plugin.wled"
+password = "wled-plugin-password"
+allow_pub = ["homecore/devices/+/state", "homecore/plugins/wled/+"]
+allow_sub = ["homecore/devices/+/cmd"]
 ```
 
 The `allow_pub` / `allow_sub` fields are **metadata only** — they are stored
@@ -904,23 +913,23 @@ rumqttd broker does not enforce per-topic ACL.  Connection-level credentials
 
 #### Plugin config when auth is enabled
 
-In the plugin's own config file (e.g. `http-poller.toml`) set the password:
+In the plugin's own config file set the password:
 
 ```toml
-[plugin]
-id          = "plugin.http-poller"
+[homecore]
+plugin_id   = "plugin.wled"
 broker_host = "127.0.0.1"
 broker_port = 1883
-password    = "poller-password"   # must match [[broker.clients]] entry
+password    = "wled-plugin-password"   # must match [[broker.clients]] entry
 ```
 
 For the Rust plugin SDK:
 ```rust
 PluginConfig {
-    plugin_id:   "plugin.http-poller".into(),
+    plugin_id:   "plugin.wled".into(),
     broker_host: "127.0.0.1".into(),
     broker_port: 1883,
-    password:    "poller-password".into(),
+    password:    "wled-plugin-password".into(),
 }
 ```
 
@@ -1195,7 +1204,7 @@ actions    — what to do, run in sequence by default
 The complete flow when a rule fires:
 
 ```
-Virtual device publishes state to MQTT
+A plugin publishes a device's state to MQTT
   → hc-mqtt-client picks it up, emits DeviceStateChanged on the internal event bus
   → RuleEngine checks every enabled rule's trigger against the event
   → Matching rules sorted by priority (highest first)
@@ -4328,307 +4337,12 @@ cargo watch -x "check --workspace"
 
 ---
 
-## http-poller — polling HTTP endpoints as HomeCore devices
+## Polling an HTTP endpoint
 
-The `http-poller` plugin turns any JSON HTTP endpoint into a HomeCore device.  It runs as a separate process, connects to the MQTT broker, and periodically publishes the fetched data as device state.  Rules, history, WebSocket events, and the REST API all treat it like any other device.
-
-**Typical use cases:**
-- Weather APIs (OpenWeatherMap, weather station REST endpoints)
-- Local devices with HTTP status pages (NAS, UPS, inverter, router)
-- Cloud services that don't support push notifications
-- Custom sensors with a `/data` endpoint (ESP32, Raspberry Pi, etc.)
-
----
-
-### Quick start
-
-```sh
-# 1. Copy the example config and edit it
-cp plugins/examples/http-poller/http-poller.example.toml http-poller.toml
-$EDITOR http-poller.toml
-
-# 2. Make sure the HomeCore server is running (Terminal 1)
-cargo run -p homecore
-
-# 3. Start the poller (Terminal 2)
-cargo run -p http-poller -- --config http-poller.toml
-```
-
-Alternatively, use the environment variable:
-```sh
-HC_CONFIG=/etc/homecore/poller.toml cargo run -p http-poller
-```
-
-On startup you will see one log line per registered device:
-```
-INFO http_poller  config="http-poller.toml" pollers=2 plugin_id="plugin.http-poller" http-poller starting
-INFO plugin_sdk_rs  device_id="sensor.outdoor_weather" Device registered
-INFO http_poller  device_id="sensor.outdoor_weather" url="https://..." interval_secs=300 mapping="field_map" Poller started
-```
-
-Devices start `offline` and transition to `online` on the first successful poll.
-
----
-
-### Config file structure
-
-The config file has two sections: `[plugin]` for the MQTT connection, and one `[[poller]]` block per device.
-
-```toml
-[plugin]
-id          = "plugin.http-poller"   # must be unique across all plugins
-broker_host = "127.0.0.1"
-broker_port = 1883
-password    = ""                     # set if broker ACL is enabled
-
-[[poller]]
-device_id     = "sensor.my_device"  # HomeCore device ID
-name          = "My Device"         # human-readable label
-url           = "http://..."        # URL to fetch
-interval_secs = 30                  # seconds between polls (default: 30)
-timeout_secs  = 10                  # per-request HTTP timeout (default: 10)
-
-[poller.headers]                     # optional — for API keys, auth tokens
-"Authorization" = "Bearer my-token"
-"X-API-Key"     = "abc123"
-
-[poller.capabilities]                # optional device schema for frontends
-temperature = { type = "number", unit = "°C" }
-humidity    = { type = "integer", unit = "%" }
-```
-
----
-
-### Response mapping — three modes
-
-#### Mode 1: `field_map` (dot-notation path extraction)
-
-Maps target attribute names to paths inside the JSON response.  Supports nested objects with `.` and array indexing with `[n]`.  Missing paths emit a warning and are omitted from the state — they don't fail the poll.
-
-```toml
-[poller.field_map]
-temperature  = "main.temp"                  # response["main"]["temp"]
-humidity     = "main.humidity"              # response["main"]["humidity"]
-description  = "weather[0].description"    # response["weather"][0]["description"]
-deep_value   = "sensors[2].readings[0].v"  # nested arrays + objects
-```
-
-#### Mode 2: `transform` (Rhai script)
-
-A script evaluated with `response` in scope.  Must return a Rhai map (`#{ ... }`).  Use this when `field_map` isn't expressive enough: arithmetic, conditionals, percentage calculations, string manipulation.
-
-```toml
-transform = """
-    let temp_k = response["temperature_kelvin"].to_float();
-    let disk   = response["storage"]["used"].to_float()
-                 / response["storage"]["total"].to_float() * 100.0;
-    #{
-        "temp_c":        temp_k - 273.15,
-        "disk_used_pct": disk,
-        "status":        if disk > 90.0 { "critical" } else { "ok" },
-    }
-"""
-```
-
-`transform` takes precedence over `field_map` if both are set.  Scripts are validated at startup — a syntax error fails fast before any polls run.
-
-#### Mode 3: raw passthrough
-
-No `field_map` and no `transform`: the full parsed JSON response body is published directly as device state.  Use this when the endpoint already returns a flat attribute map.
-
-```toml
-[[poller]]
-device_id     = "sensor.custom"
-name          = "Custom Sensor"
-url           = "http://192.168.1.200/state"
-interval_secs = 15
-# no field_map, no transform → raw passthrough
-```
-
----
-
-### Worked example — OpenWeatherMap
-
-```toml
-[plugin]
-id          = "plugin.http-poller"
-broker_host = "127.0.0.1"
-broker_port = 1883
-
-[[poller]]
-device_id     = "sensor.outdoor_weather"
-name          = "Outdoor Weather"
-url           = "https://api.openweathermap.org/data/2.5/weather?q=London,UK&units=metric&appid=YOUR_KEY"
-interval_secs = 300
-timeout_secs  = 10
-
-[poller.capabilities]
-temperature = { type = "number", unit = "°C" }
-humidity    = { type = "integer", unit = "%" }
-description = { type = "string" }
-wind_speed  = { type = "number", unit = "m/s" }
-
-[poller.field_map]
-temperature = "main.temp"
-humidity    = "main.humidity"
-description = "weather[0].description"
-wind_speed  = "wind.speed"
-```
-
-After one poll, the device appears in the API:
-
-```sh
-curl -s http://localhost:8080/api/v1/devices/sensor.outdoor_weather \
-  -H "Authorization: Bearer $TOKEN" | jq
-```
-
-```json
-{
-  "device_id": "sensor.outdoor_weather",
-  "name": "Outdoor Weather",
-  "available": true,
-  "attributes": {
-    "temperature": 18.3,
-    "humidity": 62,
-    "description": "light rain",
-    "wind_speed": 4.1
-  }
-}
-```
-
----
-
-### Worked example — complex transform (NAS status)
-
-When the response structure needs reshaping or arithmetic before it makes sense as device state:
-
-```toml
-[[poller]]
-device_id     = "sensor.nas_status"
-name          = "NAS Status"
-url           = "http://192.168.1.100:5000/api/v2/system"
-interval_secs = 30
-
-[poller.headers]
-"X-API-Key" = "nas-api-key"
-
-[poller.capabilities]
-cpu_temp_c      = { type = "number", unit = "°C" }
-disk_used_pct   = { type = "number", unit = "%" }
-memory_used_pct = { type = "number", unit = "%" }
-uptime_hours    = { type = "number" }
-
-transform = """
-    let disk_pct = response["storage"]["used_bytes"].to_float()
-                   / response["storage"]["total_bytes"].to_float() * 100.0;
-    let mem_pct  = response["memory"]["used_mb"].to_float()
-                   / response["memory"]["total_mb"].to_float() * 100.0;
-    #{
-        "cpu_temp_c":      response["cpu"]["temperature"],
-        "disk_used_pct":   disk_pct,
-        "memory_used_pct": mem_pct,
-        "uptime_hours":    response["uptime_seconds"].to_float() / 3600.0,
-    }
-"""
-```
-
----
-
-### Writing a rule that reacts to polled data
-
-Once the device is online, rules work exactly like any other device.
-
-**Example — alert when NAS disk is nearly full:**
-
-```sh
-curl -s -X POST http://localhost:8080/api/v1/automations \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "NAS disk alert",
-    "enabled": true,
-    "priority": 10,
-    "trigger": {
-      "type": "DeviceStateChanged",
-      "device_id": "sensor.nas_status",
-      "attribute": "disk_used_pct"
-    },
-    "conditions": [
-      {
-        "type": "DeviceState",
-        "device_id": "sensor.nas_status",
-        "attribute": "disk_used_pct",
-        "op": "Gt",
-        "value": 85
-      }
-    ],
-    "actions": [
-      {
-        "type": "CallService",
-        "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
-        "method": "POST",
-        "body": { "text": "NAS disk above 85% — clean up soon" }
-      }
-    ]
-  }' | jq
-```
-
-**Example — turn on a light when it gets cold outside:**
-
-```sh
-curl -s -X POST http://localhost:8080/api/v1/automations \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Cold weather lamp",
-    "enabled": true,
-    "priority": 5,
-    "trigger": {
-      "type": "DeviceStateChanged",
-      "device_id": "sensor.outdoor_weather",
-      "attribute": "temperature"
-    },
-    "conditions": [
-      {
-        "type": "DeviceState",
-        "device_id": "sensor.outdoor_weather",
-        "attribute": "temperature",
-        "op": "Lt",
-        "value": 5
-      }
-    ],
-    "actions": [
-      {
-        "type": "SetDeviceState",
-        "device_id": "light.living_room_main",
-        "state": { "on": true, "brightness_pct": 70, "color_temp": 2700 }
-      }
-    ]
-  }' | jq
-```
-
----
-
-### Availability and offline handling
-
-Each device starts `offline` when the poller starts.  After the first successful poll it goes `online`.  If a poll fails (network error, HTTP 4xx/5xx, invalid JSON), it goes `offline` and logs a warning.  It recovers automatically on the next successful poll — no restart needed.
-
-Watch availability changes in the event stream:
-```sh
-websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=device_availability_changed"
-```
-
----
-
-### Where the code lives
-
-| File | What it contains |
-|---|---|
-| `plugins/examples/http-poller/src/config.rs` | `AppConfig`, `PluginSection`, `PollerConfig` — all TOML types |
-| `plugins/examples/http-poller/src/poller.rs` | Poll loop, field_map extraction, Rhai transform, JSON↔Dynamic bridge |
-| `plugins/examples/http-poller/src/main.rs` | Startup: config load, validation, MQTT connect, task spawning |
-| `plugins/examples/http-poller/http-poller.example.toml` | Fully annotated config reference with 5 real-world examples |
-| `plugins/plugin-sdk-rs/src/lib.rs` | `DevicePublisher::set_available` (added alongside this feature) |
+The `http-poller` example plugin that used to be described here was removed
+with the other pre-monorepo examples. To bring a JSON endpoint into homeCore
+as a device, write a small plugin: start from `plugins/hc-plugin-template`
+and follow `docs/plugin-development.md`.
 
 ---
 
