@@ -15,7 +15,7 @@
 //! directly to the corresponding [`StreamContext`].
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use rumqttc::{AsyncClient, QoS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -88,6 +88,29 @@ pub struct StreamContext {
     cancel: Arc<AtomicBool>,
     terminal: Arc<AtomicBool>,
     respond_rx: AsyncMutex<mpsc::UnboundedReceiver<Value>>,
+    caller: Option<crate::Caller>,
+    clock: StreamClock,
+}
+
+/// The last `ts` a stream published, so the next is always later.
+pub(crate) type StreamClock = Arc<Mutex<Option<DateTime<Utc>>>>;
+
+/// Now, but always later than the stream's previous event.
+///
+/// Events emitted back to back (a chat's text as it is written) can fall in
+/// the same microsecond, and a reader that drops an event whose `ts` it has
+/// already seen would lose one. So each is at least a microsecond after the
+/// last, written to the microsecond.
+pub(crate) fn next_ts(clock: &StreamClock) -> String {
+    let mut last = clock.lock().unwrap();
+    let mut now = Utc::now();
+    if let Some(prev) = *last {
+        if now <= prev {
+            now = prev + chrono::Duration::microseconds(1);
+        }
+    }
+    *last = Some(now);
+    now.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
 impl StreamContext {
@@ -110,7 +133,27 @@ impl StreamContext {
             cancel,
             terminal,
             respond_rx: AsyncMutex::new(respond_rx),
+            caller: None,
+            clock: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Who started the action, from the command.
+    pub(crate) fn with_caller(mut self, caller: Option<crate::Caller>) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// The stream's clock, for the dispatcher's own last event.
+    pub(crate) fn clock(&self) -> StreamClock {
+        Arc::clone(&self.clock)
+    }
+
+    /// Who started this action, as homeCore verified it: `None` only when
+    /// the command carried no `caller` (an older core). Limit what the action
+    /// does to the caller's own scopes.
+    pub fn caller(&self) -> Option<&crate::Caller> {
+        self.caller.as_ref()
     }
 
     pub fn request_id(&self) -> &str {
@@ -160,6 +203,24 @@ impl StreamContext {
         self.await_respond().await
     }
 
+    /// Emit an `awaiting_user` event that also carries `data` for a plugin's
+    /// own screen (what to show with the question, such as a preview of a
+    /// change). `response_schema` is optional. Does not wait; pair it with
+    /// [`StreamContext::await_respond`].
+    pub async fn awaiting_user_with_data(
+        &self,
+        prompt: impl Into<String>,
+        response_schema: Option<Value>,
+        data: Value,
+    ) -> Result<()> {
+        let mut ev = json!({ "stage": "awaiting_user", "prompt": prompt.into() });
+        if let Some(schema) = response_schema {
+            ev["response_schema"] = schema;
+        }
+        ev["data"] = data;
+        self.emit_non_terminal(ev).await
+    }
+
     /// Emit only the `awaiting_user` event with `response_schema`, without
     /// blocking on the respond. Use with [`StreamContext::await_respond`]
     /// when the plugin needs to handle other work (e.g. live controller
@@ -205,6 +266,29 @@ impl StreamContext {
         message: Option<&str>,
     ) -> Result<()> {
         let mut ev = json!({ "stage": "progress" });
+        if let Some(p) = percent {
+            ev["percent"] = json!(p);
+        }
+        if let Some(l) = label {
+            ev["label"] = json!(l);
+        }
+        if let Some(m) = message {
+            ev["message"] = json!(m);
+        }
+        self.emit_non_terminal(ev).await
+    }
+
+    /// Emit a `progress` event that also carries `data`: anything a plugin's
+    /// own screen reads from the stream (a chat's text as it is written, say).
+    /// The generic UI ignores it.
+    pub async fn progress_with_data(
+        &self,
+        percent: Option<u8>,
+        label: Option<&str>,
+        message: Option<&str>,
+        data: Value,
+    ) -> Result<()> {
+        let mut ev = json!({ "stage": "progress", "data": data });
         if let Some(p) = percent {
             ev["percent"] = json!(p);
         }
@@ -297,7 +381,7 @@ impl StreamContext {
     fn fill_common_fields(&self, ev: &mut Value) {
         if let Some(obj) = ev.as_object_mut() {
             obj.insert("request_id".into(), json!(self.request_id));
-            obj.insert("ts".into(), json!(Utc::now().to_rfc3339()));
+            obj.insert("ts".into(), json!(next_ts(&self.clock)));
         }
     }
 
@@ -318,6 +402,7 @@ pub(crate) async fn finalize_stream(
     stream_topic: &str,
     request_id: &str,
     terminal_latch: &Arc<AtomicBool>,
+    clock: &StreamClock,
     closure_result: Result<()>,
 ) {
     // If the closure returned without emitting a terminal, synthesise
@@ -331,7 +416,7 @@ pub(crate) async fn finalize_stream(
         let ev = json!({
             "stage": "error",
             "request_id": request_id,
-            "ts": Utc::now().to_rfc3339(),
+            "ts": next_ts(clock),
             "message": msg,
             "data": { "reason": "plugin_dropped_stream" },
         });
@@ -347,4 +432,29 @@ pub(crate) async fn finalize_stream(
     let _ = client
         .publish(stream_topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Events emitted back to back must still carry strictly increasing
+    /// times, written to the microsecond.
+    #[test]
+    fn stream_times_strictly_increase() {
+        let clock: StreamClock = Arc::new(Mutex::new(None));
+        let times: Vec<DateTime<Utc>> = (0..200)
+            .map(|_| {
+                let ts = next_ts(&clock);
+                assert!(
+                    ts.ends_with('Z') && ts.len() == "2026-01-01T00:00:00.000000Z".len(),
+                    "{ts}"
+                );
+                DateTime::parse_from_rfc3339(&ts)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            })
+            .collect();
+        assert!(times.windows(2).all(|w| w[0] < w[1]));
+    }
 }

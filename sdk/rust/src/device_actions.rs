@@ -75,6 +75,9 @@ pub enum Role {
     Admin,
     User,
     ReadOnly,
+    /// Anyone signed in, read-only accounts included. The handler gets the
+    /// verified caller and must limit what it does to the caller's scopes.
+    SignedIn,
 }
 
 impl Role {
@@ -83,6 +86,7 @@ impl Role {
             Role::Admin => "admin",
             Role::User => "user",
             Role::ReadOnly => "read_only",
+            Role::SignedIn => "signed_in",
         }
     }
 }
