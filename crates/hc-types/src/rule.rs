@@ -827,9 +827,11 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
     },
-    /// Cancel ALL in-flight timers (delays and waits) for a rule.
+    /// Cancel every in-flight cancelable delay for a rule, whatever its key.
     ///
-    /// If `rule_id` is `None`, cancels timers for the current rule.
+    /// Only `Delay` steps with `cancelable = true` are cut short; waits
+    /// (`WaitForEvent`, `WaitForExpression`, `WaitAlertCleared`) are not
+    /// affected. If `rule_id` is `None`, cancels the current rule's delays.
     CancelRuleTimers {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule_id: Option<Uuid>,
@@ -1041,7 +1043,7 @@ pub enum Action {
     },
     /// Turn a hub mode on, off, or toggle it.
     ///
-    /// Publishes `{ "command": "on|off|toggle" }` to the mode device's cmd
+    /// Publishes `{ "action": "on|off|toggle" }` to the mode device's cmd
     /// topic.  The `ModeManager` handles the command and fires a
     /// `mode_changed` event that other rules can react to.
     ///
