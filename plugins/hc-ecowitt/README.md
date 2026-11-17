@@ -131,5 +131,5 @@ what it was at startup.
 | Code | Means |
 |---|---|
 | `receiver_unreachable` | Bound to loopback with no poller configured, so nothing can reach it — the silent failure above. |
-| `no_reports_received` | Listening, but no gateway has ever uploaded. |
-| `gateway_silent` | Reports were arriving and then stopped. |
+| `no_reports_received` | No data has arrived since startup: no upload, and no poll that returned readings. |
+| `gateway_silent` | Data was arriving (by upload or poll) and then stopped. |

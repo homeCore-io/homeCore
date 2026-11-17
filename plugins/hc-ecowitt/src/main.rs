@@ -351,10 +351,19 @@ async fn try_start(
     }
 
     // Watchdog: the listener being up says nothing about data actually arriving.
+    // A successful poll counts as a report too, so a setup that only polls
+    // is not told its uploads never arrived.
     tokio::spawn(server::watch_for_silence(
         Arc::clone(&shared),
-        cfg.ecowitt.bind_addr.clone(),
-        cfg.ecowitt.listen_port,
+        server::SilenceWatch {
+            bind_addr: cfg.ecowitt.bind_addr.clone(),
+            port: cfg.ecowitt.listen_port,
+            poll: cfg
+                .ecowitt
+                .gateway_ip
+                .clone()
+                .map(|ip| (ip, cfg.ecowitt.poll_interval_secs)),
+        },
         notices.clone(),
     ));
 
