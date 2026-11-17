@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "hc-sonos"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
