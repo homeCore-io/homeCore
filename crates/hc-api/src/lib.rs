@@ -78,6 +78,9 @@ pub enum PluginCommand {
     Start,
     Stop,
     Restart,
+    /// Its settings changed: relaunch it if it is running so it reads them.
+    /// A stopped plugin stays stopped and reads them when it next starts.
+    Reload,
 }
 
 /// Per-plugin command sender, indexed by plugin_id.

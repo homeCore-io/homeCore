@@ -1,8 +1,10 @@
 //! Hot-reload watcher for the core-owned plugin config store.
 //!
 //! Watches `{base}/config/plugins/` and, when a plugin's config file changes on
-//! disk (an operator editing it headlessly, or an API `PUT` writing it), asks
-//! the supervisor to **restart** that plugin so it re-reads its config.  Restart
+//! disk (an operator editing it headlessly, or an API `PUT` writing it), sends
+//! the supervisor a **reload**: a running plugin restarts so it re-reads its
+//! config, and a stopped one stays stopped and reads it when it next starts.
+//! Restart
 //! is the Phase 0 reload mechanism: the plugin still reads its config once at
 //! startup (`argv[1]`), and core owns its process, so a restart is the
 //! no-plugin-change way to apply a config edit.  (In-place SIGHUP-style reload
@@ -18,8 +20,10 @@
 //!   - **removal is ignored** — a transient unlink/rename never kills a running
 //!     plugin; only a readable, genuinely-changed file triggers a restart.
 //!
-//! A plugin with no local supervisor channel (disabled, or a remote plugin) is
-//! simply skipped — there is nothing to restart. Conversely, having a channel
+//! A plugin with no local supervisor channel (a remote plugin) is simply
+//! skipped; there is nothing to restart. A turned-off or stopped local plugin
+//! has a channel, which is why the watcher sends a reload and not a restart:
+//! a restart would start it. Conversely, having a channel
 //! is what makes a plugin watchable: the set is resolved per event rather than
 //! frozen at startup, so a plugin installed mid-run is covered.
 
@@ -143,9 +147,9 @@ impl PluginConfigWatcher {
                 for id in to_reload {
                     let cmds = commands.read().await;
                     match cmds.get(&id) {
-                        Some(tx) => match tx.send(PluginCommand::Restart).await {
+                        Some(tx) => match tx.send(PluginCommand::Reload).await {
                             Ok(()) => {
-                                info!(id = %id, "Plugin config changed on disk — restarting to apply")
+                                info!(id = %id, "Plugin config changed on disk; reloading it if running")
                             }
                             Err(_) => {
                                 warn!(id = %id, "Plugin config changed but supervisor not responding")
@@ -267,7 +271,7 @@ mod tests {
         store.write("plugin.a", "v = 2\n").unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "expected restart on edit, got {got:?}"
         );
 
@@ -313,7 +317,7 @@ mod tests {
             .unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "a config save must restart a plugin installed mid-run, got {got:?}"
         );
     }
@@ -424,7 +428,7 @@ mod tests {
             .unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "a settings change must restart, got {got:?}"
         );
 
@@ -437,7 +441,7 @@ mod tests {
             .unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "a [logging] change other than level must restart, got {got:?}"
         );
     }
@@ -450,7 +454,7 @@ mod tests {
         store.write("plugin.a", "host = \n").unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "a change to an unparseable file must restart, got {got:?}"
         );
 
@@ -466,7 +470,7 @@ mod tests {
         store.write("plugin.a", "host = [\n").unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            matches!(got, Ok(Some(PluginCommand::Restart))),
+            matches!(got, Ok(Some(PluginCommand::Reload))),
             "a further change to an unparseable file must restart, got {got:?}"
         );
     }
