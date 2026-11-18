@@ -8,9 +8,8 @@
 //! This enables config read/write and log level changes for remote plugins
 //! that implement the management protocol.
 
-use hc_core::EventBus;
+use hc_core::ManagementResponses;
 use hc_mqtt_client::PublishHandle;
-use hc_types::event::Event;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,22 +37,20 @@ pub struct ManagementRpc {
 
 impl ManagementRpc {
     /// Create a new RPC helper and spawn a background task that resolves
-    /// pending requests from `PluginManagementResponse` events on the bus.
-    pub fn new(publish: PublishHandle, event_bus: &EventBus) -> Self {
+    /// pending requests from the replies the state bridge hands to
+    /// `responses`. That channel is private: replies can carry a plugin's
+    /// config and secrets, so they are never put on the public event bus.
+    pub fn new(publish: PublishHandle, responses: &ManagementResponses) -> Self {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
-        // Background task: listen for management response events from state_bridge.
+        // Background task: resolve pending requests as replies arrive.
         {
-            let mut rx = event_bus.subscribe();
+            let mut rx = responses.subscribe();
             let pending_clone = Arc::clone(&pending);
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(Event::Custom {
-                            payload,
-                            event_type,
-                            ..
-                        }) if event_type == "plugin_management_response" => {
+                        Ok(payload) => {
                             let request_id =
                                 payload["request_id"].as_str().unwrap_or("").to_string();
                             if request_id.is_empty() {
@@ -64,9 +61,8 @@ impl ManagementRpc {
                                 let _ = tx.send(payload);
                             }
                         }
-                        Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            debug!("ManagementRpc: lagged by {n} events");
+                            debug!("ManagementRpc: lagged by {n} replies");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -262,5 +258,76 @@ impl ManagementRpc {
             .unwrap_or(DEFAULT_TIMEOUT);
         self.dispatch(plugin_id, action, request_id, timeout, extra)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hc_core::{state_bridge::StateBridge, EventBus};
+    use hc_mqtt_client::{MqttClient, MqttClientConfig};
+    use hc_types::event::Event;
+
+    /// The real state bridge hands a plugin's reply to the RPC, which
+    /// resolves, while the public bus sees nothing of it.
+    #[tokio::test]
+    async fn a_reply_resolves_the_request_without_touching_the_public_bus() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = hc_state::StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        // Never run: the command just queues in the client, which is all
+        // `dispatch` needs before it waits for the reply.
+        let (client, _rx) = MqttClient::new(MqttClientConfig {
+            broker_host: "127.0.0.1".into(),
+            broker_port: 1,
+            client_id: "test.rpc".into(),
+            username: None,
+            password: None,
+        });
+        let internal = EventBus::new(16);
+        let pub_bus = EventBus::new(16);
+        let mut public = pub_bus.subscribe();
+        let responses = ManagementResponses::new(16);
+        let rpc = ManagementRpc::new(client.publish_handle(), &responses);
+        let bridge =
+            StateBridge::new(internal.clone(), pub_bus, store).with_management_responses(responses);
+        tokio::spawn(bridge.run());
+
+        let asking = rpc.clone();
+        let request = tokio::spawn(async move { asking.get_config("plugin.demo").await });
+        let rid = loop {
+            if let Some(rid) = rpc.pending.lock().await.keys().next().cloned() {
+                break rid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+
+        let reply = json!({
+            "request_id": rid,
+            "status": "ok",
+            "data": "password = \"not-for-events\"",
+        });
+        internal
+            .publish(Event::MqttMessage {
+                timestamp: chrono::Utc::now(),
+                topic: "homecore/plugins/plugin.demo/manage/response".into(),
+                payload: serde_json::to_vec(&reply).unwrap(),
+                retain: false,
+            })
+            .unwrap();
+
+        let got = request.await.unwrap().expect("the request resolves");
+        assert_eq!(got["data"], reply["data"]);
+        assert!(
+            matches!(
+                public.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "a management reply must not reach the public bus"
+        );
     }
 }

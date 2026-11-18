@@ -57,6 +57,40 @@ impl EventBus {
     }
 }
 
+/// The private channel plugin management replies travel on.
+///
+/// A reply on `homecore/plugins/{id}/manage/response` can carry a plugin's
+/// whole config (`get_config` returns the raw TOML, broker password and API
+/// keys included), so it must never reach the public [`EventBus`], whose
+/// events go to `/events`, the event WebSocket and rule triggers. The state
+/// bridge sends replies here and only the management RPC listens.
+#[derive(Clone)]
+pub struct ManagementResponses {
+    tx: broadcast::Sender<serde_json::Value>,
+}
+
+impl ManagementResponses {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<serde_json::Value> {
+        self.tx.subscribe()
+    }
+
+    /// Hand a reply to whoever is waiting. Dropped when no one listens.
+    pub fn send(&self, response: serde_json::Value) {
+        let _ = self.tx.send(response);
+    }
+}
+
+impl Default for ManagementResponses {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
 /// Location config for solar event calculations.
 #[derive(Debug, Clone, Copy)]
 pub struct LocationConfig {
@@ -123,6 +157,8 @@ pub struct Core {
     pauses: engine::Pauses,
     /// Temperatures converted to °C as they arrived, shared with the API.
     unit_conversions: unit_ingest::Conversions,
+    /// Where plugin management replies go, private to the management RPC.
+    management_responses: Option<ManagementResponses>,
 }
 
 impl Core {
@@ -159,7 +195,16 @@ impl Core {
             hub_vars: Default::default(),
             pauses: Default::default(),
             unit_conversions: Default::default(),
+            management_responses: None,
         }
+    }
+
+    /// Send plugin management replies to `responses`, the channel the
+    /// management RPC listens on. Without it replies are dropped: they are
+    /// never put on the public bus.
+    pub fn with_management_responses(mut self, responses: ManagementResponses) -> Self {
+        self.management_responses = Some(responses);
+        self
     }
 
     /// Run the alert engine (H4), keeping its alerts in `handle` — shared
@@ -333,6 +378,7 @@ impl Core {
         let bridge_log_tx = self.log_tx.clone();
         let bridge_log_ring = self.log_ring.clone();
         let bridge_conversions = self.unit_conversions.clone();
+        let bridge_management = self.management_responses.clone();
         tokio::spawn(async move {
             loop {
                 let mut bridge = state_bridge::StateBridge::new(
@@ -352,6 +398,9 @@ impl Core {
                 }
                 if let (Some(tx), Some(ring)) = (bridge_log_tx.clone(), bridge_log_ring.clone()) {
                     bridge = bridge.with_log_stream(tx, ring);
+                }
+                if let Some(responses) = bridge_management.clone() {
+                    bridge = bridge.with_management_responses(responses);
                 }
 
                 let handle = tokio::spawn(bridge.run());

@@ -20,7 +20,7 @@
 use crate::{
     device_naming::{ensure_unique_canonical_name, normalize_name_segment},
     unit_ingest::{self, Conversions, DeviceUnits, UnitCache},
-    EventBus,
+    EventBus, ManagementResponses,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -67,6 +67,9 @@ pub struct StateBridge {
     units: UnitCache,
     /// The temperatures converted to °C as they arrived. Shared with the API.
     conversions: Conversions,
+    /// Private channel for plugin management replies. They can hold a
+    /// plugin's config and its secrets, so they never go on `pub_bus`.
+    management_responses: Option<ManagementResponses>,
 }
 
 impl StateBridge {
@@ -85,7 +88,15 @@ impl StateBridge {
             log_ring: None,
             units: UnitCache::default(),
             conversions: Conversions::default(),
+            management_responses: None,
         }
+    }
+
+    /// Send plugin management replies to the management RPC's private
+    /// channel. Without one they are dropped.
+    pub fn with_management_responses(mut self, responses: ManagementResponses) -> Self {
+        self.management_responses = Some(responses);
+        self
     }
 
     /// Record temperature conversions here, where the API can read them.
@@ -281,12 +292,13 @@ impl StateBridge {
             && parts[3] == "manage"
             && parts[4] == "response"
         {
-            if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(payload) {
-                let _ = self.pub_bus.publish(Event::Custom {
-                    timestamp: Utc::now(),
-                    event_type: "plugin_management_response".to_string(),
-                    payload: resp,
-                });
+            // Never onto `pub_bus`: a reply can be a plugin's whole config,
+            // secrets included, and the public bus feeds `/events`, the
+            // event WebSocket and rule triggers.
+            if let Some(ref responses) = self.management_responses {
+                if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    responses.send(resp);
+                }
             }
             return Ok(());
         }
@@ -1850,5 +1862,66 @@ mod unit_tests {
         let stored = store.get_device("new_1").await.unwrap().unwrap();
         assert_eq!(stored.attributes["temperature"], serde_json::json!(21.5));
         assert_eq!(conversions.list().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod management_response_tests {
+    use super::*;
+
+    /// A `get_config` reply is a plugin's whole config, secrets included.
+    /// It goes to the management RPC's private channel and nowhere on the
+    /// public bus, which feeds `/events`, the event WebSocket and rules.
+    #[tokio::test]
+    async fn a_management_reply_never_reaches_the_public_bus() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let pub_bus = EventBus::new(16);
+        let mut public = pub_bus.subscribe();
+        let responses = ManagementResponses::new(16);
+        let mut private = responses.subscribe();
+        let bridge = StateBridge::new(EventBus::new(16), pub_bus, store)
+            .with_management_responses(responses);
+
+        let reply = br#"{"request_id":"r1","status":"ok","data":"password = \"not-for-events\""}"#;
+        bridge
+            .handle_mqtt("homecore/plugins/plugin.demo/manage/response", reply)
+            .await
+            .unwrap();
+
+        let got = private.try_recv().expect("reply on the private channel");
+        assert_eq!(got["request_id"], "r1");
+        assert!(
+            matches!(
+                public.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "nothing may reach the public bus"
+        );
+
+        // With no private channel attached the reply is dropped, still not
+        // put on the public bus.
+        let pub_bus = EventBus::new(16);
+        let mut public = pub_bus.subscribe();
+        let store = StateStore::open(
+            &dir.path().join("s2.redb").to_string_lossy(),
+            &dir.path().join("h2.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let bridge = StateBridge::new(EventBus::new(16), pub_bus, store);
+        bridge
+            .handle_mqtt("homecore/plugins/plugin.demo/manage/response", reply)
+            .await
+            .unwrap();
+        assert!(matches!(
+            public.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

@@ -419,7 +419,7 @@ async fn awaiting_user_with_schema_roundtrip() -> Result<()> {
 // not just MQTT. The harness below spins up AppState + axum on a free TCP
 // port, pre-seeds hc-captest's capability manifest into the plugin
 // registry (skipping state_bridge), and wires a minimal forwarder for
-// manage/response → Event::Custom("plugin_management_response") so
+// manage/response → the private `ManagementResponses` channel so
 // ManagementRpc can resolve requests.
 
 struct HttpHarness {
@@ -436,7 +436,6 @@ struct HttpHarness {
 }
 
 async fn boot_http_harness() -> Result<HttpHarness> {
-    use chrono::Utc;
     use hc_api::{management_rpc::ManagementRpc, AppState, AppStateParams, PluginRecord};
     use hc_auth::{JwtService, Role};
     use hc_core::EventBus;
@@ -502,13 +501,13 @@ async fn boot_http_harness() -> Result<HttpHarness> {
         }
     });
 
-    // Forwarder 2 (state_bridge shim): synthesise the events downstream
-    // code expects. ManagementRpc needs Event::Custom with
-    // event_type="plugin_management_response". We skip the rest of
-    // state_bridge and pre-seed PluginRecord instead.
+    // Forwarder 2 (state_bridge shim): hand management replies to the
+    // private channel ManagementRpc listens on, as state_bridge does. We
+    // skip the rest of state_bridge and pre-seed PluginRecord instead.
+    let management_responses = hc_core::ManagementResponses::default();
     {
         let mut rx = bus.subscribe();
-        let bus_shim = bus.clone();
+        let responses = management_responses.clone();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -521,11 +520,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                             && parts[4] == "response"
                         {
                             if let Ok(resp) = serde_json::from_slice::<Value>(&payload) {
-                                let _ = bus_shim.publish(Event::Custom {
-                                    timestamp: Utc::now(),
-                                    event_type: "plugin_management_response".into(),
-                                    payload: resp,
-                                });
+                                responses.send(resp);
                             }
                         }
                     }
@@ -584,7 +579,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
         ..AppStateParams::new(store, bus.clone(), jwt)
     });
     // Wire management_rpc so post_plugin_command forwards commands.
-    let rpc = ManagementRpc::new(publish_handle.clone(), &bus);
+    let rpc = ManagementRpc::new(publish_handle.clone(), &management_responses);
     let state = AppState {
         management_rpc: Some(rpc),
         ..state
