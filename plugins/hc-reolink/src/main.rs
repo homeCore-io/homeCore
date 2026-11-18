@@ -17,6 +17,7 @@ mod config;
 mod go2rtc;
 mod host;
 mod push;
+mod redact;
 mod siren;
 
 #[cfg(test)]
@@ -48,7 +49,7 @@ async fn main() {
     let cfg = match Config::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            error!(error = %e, path = %config_path, "Failed to load config");
+            error!(error = %crate::redact::redact(&e.to_string()), path = %config_path, "Failed to load config");
             std::process::exit(1);
         }
     };
@@ -57,11 +58,11 @@ async fn main() {
         match run(&cfg, &config_path, log_level.clone(), mqtt_logs.clone()).await {
             Ok(()) => return,
             Err(e) if attempt < MAX_ATTEMPTS => {
-                error!(error = %e, attempt, "Startup failed; retrying in {RETRY_DELAY_SECS} s");
+                error!(error = %crate::redact::redact(&e.to_string()), attempt, "Startup failed; retrying in {RETRY_DELAY_SECS} s");
                 tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
             }
             Err(e) => {
-                error!(error = %e, "Startup failed after {MAX_ATTEMPTS} attempts; exiting");
+                error!(error = %crate::redact::redact(&e.to_string()), "Startup failed after {MAX_ATTEMPTS} attempts; exiting");
                 std::process::exit(1);
             }
         }
@@ -150,7 +151,7 @@ async fn run(
                 }
             };
             if let Err(e) = sent {
-                warn!(device_id = %r.device, error = %e, "siren state not published");
+                warn!(device_id = %r.device, error = %crate::redact::redact(&e.to_string()), "siren state not published");
             }
         }
     });
@@ -230,7 +231,7 @@ async fn run(
             )
             .await
         {
-            error!(error = %e, "SDK event loop exited");
+            error!(error = %crate::redact::redact(&e.to_string()), "SDK event loop exited");
         }
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -277,7 +278,9 @@ async fn run(
                 }
                 tokio::spawn(host::run(ctx.clone(), h));
             }
-            Err(e) => warn!(host = %entry.id, error = %e, "can't set up"),
+            Err(e) => {
+                warn!(host = %entry.id, error = %crate::redact::redact(&e.to_string()), "can't set up")
+            }
         }
     }
     info!(hosts = cfg.reolink.hosts.len(), "watching");
@@ -287,7 +290,7 @@ async fn run(
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = host::command(&ctx, &device_id, &payload).await {
-                warn!(device_id = %device_id, error = %e, "command failed");
+                warn!(device_id = %device_id, error = %crate::redact::redact(&e.to_string()), "command failed");
             }
         });
     }

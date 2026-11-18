@@ -71,7 +71,8 @@ impl Ctx {
             let k = (topic.to_string(), key.to_string());
             let changed = match &reason {
                 Some(r) => {
-                    let mut al = PluginAlert::new(topic, r.clone());
+                    // Every role reads alerts: no token or password, whatever the error said.
+                    let mut al = PluginAlert::new(topic, crate::redact::redact(r));
                     al.key = Some(key.to_string());
                     a.insert(k, al.clone()) != Some(al)
                 }
@@ -83,7 +84,7 @@ impl Ctx {
             a.values().cloned().collect()
         };
         if let Err(e) = self.publisher.set_plugin_alerts(&list).await {
-            warn!(error = %e, "alerts not published");
+            warn!(error = %crate::redact::redact(&e.to_string()), "alerts not published");
         }
     }
 
@@ -104,7 +105,7 @@ impl Ctx {
                         info!(device_id = %id, "retired: no longer there");
                     }
                 }
-                Err(e) => warn!(error = %e, "reconcile failed"),
+                Err(e) => warn!(error = %crate::redact::redact(&e.to_string()), "reconcile failed"),
             }
         }
     }
@@ -216,12 +217,12 @@ pub async fn run(ctx: Arc<Ctx>, host: Arc<Host>) {
                 ctx.alert("login_refused", &host.entry.id, None).await;
                 wait = Duration::from_secs(5);
                 if let Err(e) = watch(&ctx, &host).await {
-                    warn!(host = %host.entry.id, error = %e, "stopped answering");
+                    warn!(host = %host.entry.id, error = %crate::redact::redact(&e.to_string()), "stopped answering");
                     went_offline(&ctx, &host, &e).await;
                 }
             }
             Err(e) => {
-                warn!(host = %host.entry.id, error = %e, "can't connect");
+                warn!(host = %host.entry.id, error = %crate::redact::redact(&e.to_string()), "can't connect");
                 went_offline(&ctx, &host, &e).await;
                 if e.downcast_ref::<api::LoginRefused>().is_some() {
                     // A refusal isn't fixed by trying again: wait for a new password.
@@ -675,11 +676,11 @@ async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
                     }
                 };
                 host.pushing.store(false, Ordering::Relaxed);
-                warn!(host = %e.id, error = %why, "push stopped");
+                warn!(host = %e.id, error = %crate::redact::redact(&why.to_string()), "push stopped");
             }
             Err(err) => {
                 let refused = err.downcast_ref::<api::LoginRefused>().is_some();
-                warn!(host = %e.id, error = %err, "no push");
+                warn!(host = %e.id, error = %crate::redact::redact(&err.to_string()), "no push");
                 ctx.alert(
                     "push_down",
                     &e.id,
@@ -826,7 +827,7 @@ async fn seen(ctx: &Ctx, host: &Arc<Host>, channel: u32, d: Detections) {
     }
     if snap {
         if let Err(e) = snapshot(ctx, host, &cam).await {
-            warn!(camera = %cam.id, error = %e, "no snapshot");
+            warn!(camera = %cam.id, error = %crate::redact::redact(&e.to_string()), "no snapshot");
         }
     }
 }

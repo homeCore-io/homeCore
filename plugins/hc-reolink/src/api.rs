@@ -13,7 +13,7 @@
 //! The parsing is plain functions over `serde_json::Value`, tested against
 //! answers in Reolink's documented shapes; the talking is [`Reolink`].
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -452,15 +452,14 @@ impl Reolink {
         } else {
             " If the device only answers HTTPS, turn HTTPS on in this row."
         };
+        // Only the address, and that with any user:password@ masked.
+        let base = crate::redact::redact(&self.base);
         let what = if e.is_timeout() {
-            format!("{} didn't answer in 15 s. Is the address right?", self.base)
+            format!("{base} didn't answer in 15 s. Is the address right?")
         } else if e.is_connect() {
-            format!(
-                "{} refused the connection or couldn't be reached.{hint}",
-                self.base
-            )
+            format!("{base} refused the connection or couldn't be reached.{hint}")
         } else {
-            format!("{} broke off the request.{hint}", self.base)
+            format!("{base} broke off the request.{hint}")
         };
         anyhow!(what)
     }
@@ -504,7 +503,7 @@ impl Reolink {
             .map_err(|e| self.unreachable(&e))?
             .json()
             .await
-            .context("not a Reolink answer")?;
+            .map_err(|e| crate::redact::http_error(e).context("not a Reolink answer"))?;
         let (token, lease) = parse_login(&answer).map_err(|e| anyhow!(LoginRefused(e)))?;
         *s = Some((token.clone(), Instant::now() + Duration::from_secs(lease)));
         Ok(token)
@@ -539,7 +538,7 @@ impl Reolink {
                 .map_err(|e| self.unreachable(&e))?
                 .json()
                 .await
-                .context("not a Reolink answer")?;
+                .map_err(|e| crate::redact::http_error(e).context("not a Reolink answer"))?;
             let out = results(&answer);
             if attempt == 0 && out.iter().any(|r| matches!(r, Err(e) if e.needs_login())) {
                 *self.session.lock().await = None;
@@ -572,7 +571,11 @@ impl Reolink {
             .send()
             .await
             .map_err(|e| self.unreachable(&e))?;
-        let bytes = res.bytes().await?.to_vec();
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(crate::redact::http_error)?
+            .to_vec();
         if bytes.starts_with(&[0xff, 0xd8]) {
             Ok(bytes)
         } else {
