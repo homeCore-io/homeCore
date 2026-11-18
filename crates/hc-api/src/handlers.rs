@@ -7791,10 +7791,12 @@ pub async fn receive_webhook(
 /// - `device_id` — only events for this device
 pub async fn list_events(
     State(s): State<AppState>,
-    _: DevicesRead,
+    DevicesRead(claims): DevicesRead,
     axum::extract::Query(query): axum::extract::Query<crate::event_log::EventLogQuery>,
 ) -> impl IntoResponse {
-    let entries = s.event_log.query(&query);
+    // Only what this caller may read through each event's own resource:
+    // devices:read lets them in, not see every rule and webhook call.
+    let entries = s.event_log.query(&query, &claims);
     (StatusCode::OK, Json(json!(entries)))
 }
 

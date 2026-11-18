@@ -5,7 +5,13 @@
 //!
 //! Events excluded from the log: `MqttMessage` and `PluginHeartbeat`
 //! (high-frequency, low value for the API consumer).
+//!
+//! A query is answered for one caller: an entry they may not see (see
+//! [`crate::event_access`]) is left out, as the live stream leaves it out,
+//! and `limit` counts only what they are shown.
 
+use crate::event_access::{self, Audience, View};
+use hc_auth::Claims;
 use hc_types::event::Event;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -26,6 +32,9 @@ pub struct LogEntry {
     pub device_id: Option<String>,
     /// Full event serialized as a JSON object.
     pub event: Value,
+    /// Who may see it, decided once when it is logged.
+    #[serde(skip)]
+    pub audience: Audience,
 }
 
 /// Bounded ring buffer of recent events.
@@ -83,11 +92,13 @@ impl EventLog {
             event_type,
             device_id,
             event: json,
+            audience: event_access::audience(event),
         });
     }
 
-    /// Query the log.  Results are newest-first.
-    pub fn query(&self, filter: &EventLogQuery) -> Vec<LogEntry> {
+    /// Query the log for `viewer`, leaving out what they may not see.
+    /// Results are newest-first.
+    pub fn query(&self, filter: &EventLogQuery, viewer: &Claims) -> Vec<LogEntry> {
         let g = self.inner.lock().unwrap();
         let limit = filter.limit.unwrap_or(50).min(1_000) as usize;
 
@@ -116,8 +127,18 @@ impl EventLog {
                 }
                 true
             })
+            .filter_map(|e| match event_access::view(viewer, e.audience) {
+                View::Whole => Some(e.clone()),
+                View::PluginUi => Some(LogEntry {
+                    seq: e.seq,
+                    event_type: e.event_type.clone(),
+                    device_id: e.device_id.clone(),
+                    event: event_access::plugin_ui_only(&e.event),
+                    audience: e.audience,
+                }),
+                View::Nothing => None,
+            })
             .take(limit)
-            .cloned()
             .collect()
     }
 }
@@ -225,6 +246,10 @@ mod tests {
     use chrono::Utc;
     use hc_types::device::DeviceChange;
 
+    fn admin() -> Claims {
+        crate::event_access::tests::user(hc_auth::user::Role::Admin)
+    }
+
     fn rule_fired(rule_id: &str) -> Event {
         Event::RuleFired {
             timestamp: Utc::now(),
@@ -263,7 +288,7 @@ mod tests {
         let log = EventLog::new(100);
         log.push(&rule_fired("r1"));
         log.push(&rule_fired("r2"));
-        let results = log.query(&EventLogQuery::default());
+        let results = log.query(&EventLogQuery::default(), &admin());
         assert_eq!(results.len(), 2);
         // newest first
         assert_eq!(results[0].seq, 2);
@@ -275,7 +300,7 @@ mod tests {
         let log = EventLog::new(100);
         log.push(&mqtt_msg());
         log.push(&rule_fired("r1"));
-        let results = log.query(&EventLogQuery::default());
+        let results = log.query(&EventLogQuery::default(), &admin());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event_type, "rule_fired");
     }
@@ -286,7 +311,7 @@ mod tests {
         for i in 0..5u64 {
             log.push(&rule_fired(&i.to_string()));
         }
-        let results = log.query(&EventLogQuery::default());
+        let results = log.query(&EventLogQuery::default(), &admin());
         // Only last 3 kept, newest first → seqs 5, 4, 3
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].seq, 5);
@@ -298,10 +323,13 @@ mod tests {
         let log = EventLog::new(100);
         log.push(&rule_fired("r1"));
         log.push(&device_changed("light.1"));
-        let results = log.query(&EventLogQuery {
-            event_type: Some("rule_fired".into()),
-            ..Default::default()
-        });
+        let results = log.query(
+            &EventLogQuery {
+                event_type: Some("rule_fired".into()),
+                ..Default::default()
+            },
+            &admin(),
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event_type, "rule_fired");
     }
@@ -312,10 +340,13 @@ mod tests {
         log.push(&device_changed("light.1"));
         log.push(&device_changed("light.2"));
         log.push(&rule_fired("r1"));
-        let results = log.query(&EventLogQuery {
-            device_id: Some("light.1".into()),
-            ..Default::default()
-        });
+        let results = log.query(
+            &EventLogQuery {
+                device_id: Some("light.1".into()),
+                ..Default::default()
+            },
+            &admin(),
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].device_id, Some("light.1".into()));
     }
@@ -326,10 +357,13 @@ mod tests {
         for i in 0..20u64 {
             log.push(&rule_fired(&i.to_string()));
         }
-        let results = log.query(&EventLogQuery {
-            limit: Some(5),
-            ..Default::default()
-        });
+        let results = log.query(
+            &EventLogQuery {
+                limit: Some(5),
+                ..Default::default()
+            },
+            &admin(),
+        );
         assert_eq!(results.len(), 5);
         // Should be the 5 most recent
         assert_eq!(results[0].seq, 20);
@@ -342,10 +376,13 @@ mod tests {
             log.push(&rule_fired(&i.to_string()));
         }
         // Requesting more than 1000 should be capped
-        let results = log.query(&EventLogQuery {
-            limit: Some(9999),
-            ..Default::default()
-        });
+        let results = log.query(
+            &EventLogQuery {
+                limit: Some(9999),
+                ..Default::default()
+            },
+            &admin(),
+        );
         assert_eq!(results.len(), 1000);
     }
 
@@ -359,10 +396,60 @@ mod tests {
             scene_id: "s1".to_string(),
             scene_name: "Evening".to_string(),
         });
-        let results = log.query(&EventLogQuery {
-            event_type: Some("rule_fired,scene_activated".into()),
-            ..Default::default()
-        });
+        let results = log.query(
+            &EventLogQuery {
+                event_type: Some("rule_fired,scene_activated".into()),
+                ..Default::default()
+            },
+            &admin(),
+        );
         assert_eq!(results.len(), 2);
+    }
+
+    /// What a narrow key reads from the log: device events, and none of the
+    /// rule or webhook events beside them. The webhook's path is its secret.
+    #[test]
+    fn a_device_reading_key_reads_device_events_only() {
+        use crate::event_access::tests::{key, rule_removed, webhook_event};
+        let log = EventLog::new(100);
+        log.push(&device_changed("light.1"));
+        log.push(&webhook_event());
+        log.push(&rule_removed());
+        log.push(&rule_fired("r1"));
+        log.push(&device_changed("light.2"));
+
+        let k = key(&["devices:read"]);
+        let seen = log.query(&EventLogQuery::default(), &k);
+        let types: Vec<&str> = seen.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(types, ["device_state_changed", "device_state_changed"]);
+        let body = serde_json::to_string(&seen).unwrap();
+        assert!(
+            !body.contains("s3cret-path"),
+            "the webhook path leaked: {body}"
+        );
+
+        // `limit` counts what the caller is shown, not what was skipped.
+        let one = log.query(
+            &EventLogQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+            &k,
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].device_id.as_deref(), Some("light.2"));
+
+        // Asking for them by name does not get round it.
+        let asked = log.query(
+            &EventLogQuery {
+                event_type: Some("custom,rule_removed,rule_fired".into()),
+                ..Default::default()
+            },
+            &k,
+        );
+        assert!(asked.is_empty());
+
+        // An admin reads all five.
+        assert_eq!(log.query(&EventLogQuery::default(), &admin()).len(), 5);
     }
 }

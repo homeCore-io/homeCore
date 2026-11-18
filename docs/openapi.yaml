@@ -1826,6 +1826,11 @@ paths:
     get:
       operationId: listEvents
       summary: Query the recent event log (last 1,000 events, MqttMessage excluded)
+      description: |
+        Requires `devices:read`. Each entry is shown only to a caller who may
+        read it, by the same rule as the live stream (see `/events/stream`):
+        rule and webhook events need `automations:read`, scene events
+        `scenes:read`, and so on. `limit` counts the entries returned.
       tags: [events]
       security:
         - bearerAuth: []
@@ -2669,6 +2674,27 @@ paths:
 
         A token is judged as its own even from a whitelisted address; only a
         request with no token falls back to the whitelist — as for REST.
+
+        **Who is sent what:** only the events the caller may read through each
+        event's own resource. Device, timer, mode and alert events need
+        `devices:read`; rule events (`rule_fired`, `rule_changed`,
+        `rule_removed`, `rule_evaluation_failed`, `action_failed`) and the
+        rule engine's `custom` events (`webhook`, `scheduler_tick`,
+        `manual_rule_fire`, `deferred_rule_fire`, `hub_variable_changed`,
+        `system_started`) need `automations:read`; scene events
+        `scenes:read`; room events `areas:read`; `plugin_heartbeat`
+        `plugins:read`. `plugin_registered`, `plugin_offline` and
+        `plugin_status_changed` go to `plugins:read` or `devices:read`.
+        `plugin_capabilities` goes whole to `plugins:read`, and to a
+        `devices:read` caller without it only as `type`, `timestamp`,
+        `plugin_id` and `ui`. Any other `custom` event (a rule's own
+        `FireEvent`, for one) and `system_alert` go to admins only. Admins are
+        sent everything. Naming a type in `type` does not widen this.
+
+        The token is checked again every 30 seconds: a stream whose token has
+        expired, whose session has ended or whose password has changed, or
+        whose key has been revoked, is closed with code 1008 (reason
+        `token_expired` or `token_revoked`). Reconnect with a current token.
 
         **Filtering (optional):**
         - `type` — comma-separated event type names (e.g. `device_state_changed,rule_fired`)

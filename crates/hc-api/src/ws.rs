@@ -15,6 +15,17 @@
 //! it is missing or invalid the server returns HTTP 401 and the connection is
 //! never upgraded.
 //!
+//! ## What a caller is sent
+//! Only the events they may read through each event's own resource, as
+//! [`crate::event_access`] decides from the claims the stream was opened with:
+//! device events with `devices:read`, rule and webhook events with
+//! `automations:read`, and so on. The snapshot is cut the same way.
+//!
+//! The credential is checked again on every ping: a stream whose token has
+//! expired, whose session has ended or whose key has been revoked is closed
+//! (code 1008, reason `token_expired` / `token_revoked`), and the client
+//! reconnects with a current one.
+//!
 //! ## Filtering (optional)
 //! - `type`      — comma-separated event type names, e.g. `device_state_changed,rule_fired`.
 //!   All events on the public bus are forwarded by default; `MqttMessage` events
@@ -43,18 +54,19 @@
 //! otherwise, so it knows to read again.
 
 use crate::auth_middleware::whitelist_claims;
+use crate::event_access::{self, View};
 use crate::event_log::{event_device_id, event_type_name};
 use crate::AppState;
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use hc_auth::Claims;
+use hc_auth::{Actor, Claims};
 use hc_types::event::Event;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -323,6 +335,91 @@ fn normalize_event(event: Event) -> Event {
     }
 }
 
+/// The text frame `event` becomes for this caller, or `None` when it is not
+/// sent to them: because they may not see it (see [`crate::event_access`]),
+/// or because their filters leave it out.
+///
+/// Who may see an event is decided before the filters, so naming a type in
+/// `?type=` never gets round it.
+pub(crate) fn event_frame(
+    claims: &Claims,
+    event: Event,
+    type_filter: Option<&[String]>,
+    device_filter: Option<&str>,
+) -> Option<String> {
+    let view = event_access::view(claims, event_access::audience(&event));
+    if view == View::Nothing {
+        return None;
+    }
+
+    // Skip noisy heartbeats unless the client explicitly asked for them —
+    // and what plugins report as alerts, which a client sees as
+    // `alert_raised` / `alert_cleared` once the house has decided.
+    if matches!(
+        event,
+        Event::PluginHeartbeat { .. } | Event::PluginAlerts { .. }
+    ) && type_filter.is_none()
+    {
+        return None;
+    }
+
+    if let Some(wanted_device) = device_filter {
+        if event_device_id(&event) != Some(wanted_device) {
+            return None;
+        }
+    }
+
+    if let Some(types) = type_filter {
+        if !types.iter().any(|t| t == event_type_name(&event)) {
+            return None;
+        }
+    }
+
+    let json = match view {
+        View::PluginUi => {
+            serde_json::to_value(&event).map(|v| event_access::plugin_ui_only(&v).to_string())
+        }
+        _ => serde_json::to_string(&normalize_event(event)),
+    };
+    match json {
+        Ok(j) => Some(j),
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize event");
+            None
+        }
+    }
+}
+
+/// Whether the credential a stream was opened with still holds, checked on
+/// every ping (so within [`PING_INTERVAL`]). A stream used to outlive its
+/// token: a session signed out, a password changed, a key revoked or a token
+/// expired, and the socket went on carrying the house. `Err` is the reason it
+/// is closed, logged like the others.
+async fn credential_holds(state: &AppState, claims: &Claims) -> Result<(), &'static str> {
+    let now = chrono::Utc::now();
+    // `u64::MAX` for the synthetic claims (keys, whitelist, UDS); keys carry
+    // their own expiry on the record, checked below.
+    if claims.exp != u64::MAX && claims.exp <= now.timestamp().max(0) as u64 {
+        return Err("token_expired");
+    }
+    match claims.actor() {
+        Actor::User { .. } => crate::auth_middleware::token_version_current(state, claims)
+            .await
+            .map_err(|_| "token_revoked"),
+        Actor::ApiKey { id, .. } => match state.store.get_api_key_by_id(id).await {
+            Ok(Some(record)) if record.is_usable(now) => Ok(()),
+            Ok(_) => Err("token_revoked"),
+            // Fails closed, as `token_version_current` does: the client
+            // reconnects, and is let back in if the key is good.
+            Err(e) => {
+                warn!(error = %e, "Could not re-check an event stream's API key");
+                Err("token_revoked")
+            }
+        },
+        _ => Ok(()),
+    }
+}
+
 /// Inner validation logic, separated so it can be unit-tested without a full `AppState`.
 pub(crate) fn validate_ws_token(
     token: Option<&str>,
@@ -438,6 +535,9 @@ async fn handle_socket(
     //   event_send_failed — couldn't push an event payload (write err)
     //   bus_closed        — broadcast channel closed (server shutdown)
     //   snapshot_failed   — the requested snapshot could not be read
+    //   token_expired     — the token it was opened with has expired
+    //   token_revoked     — that session ended, its password changed, its
+    //                       user or key is gone or revoked
     let reason: &'static str = 'stream: {
         if let Some(reason) = opening {
             break 'stream reason;
@@ -463,6 +563,15 @@ async fn handle_socket(
                 }
 
                 _ = ping_ticker.tick() => {
+                    if let Err(reason) = credential_holds(&state, &claims).await {
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: close_code::POLICY,
+                                reason: reason.into(),
+                            })))
+                            .await;
+                        break reason;
+                    }
                     if outstanding_ping {
                         // Previous ping never got a pong — assume the socket is dead.
                         break "pong_timeout";
@@ -476,38 +585,13 @@ async fn handle_socket(
                 event = rx.recv() => {
                     match event {
                         Ok(event) => {
-                            // Skip noisy heartbeats unless the client explicitly asked for them —
-                            // and what plugins report as alerts, which a client sees as
-                            // `alert_raised` / `alert_cleared` once the house has decided.
-                            if matches!(event, Event::PluginHeartbeat { .. } | Event::PluginAlerts { .. })
-                                && type_filter.is_none()
-                            {
+                            let Some(json) = event_frame(
+                                &claims,
+                                event,
+                                type_filter.as_deref(),
+                                device_filter.as_deref(),
+                            ) else {
                                 continue;
-                            }
-
-                            // Apply device_id filter.
-                            if let Some(ref wanted_device) = device_filter {
-                                if !event_device_id(&event)
-                                    .map(|d| d == wanted_device)
-                                    .unwrap_or(false)
-                                {
-                                    continue;
-                                }
-                            }
-
-                            // Apply event type filter.
-                            if let Some(ref types) = type_filter {
-                                if !types.iter().any(|t| t == event_type_name(&event)) {
-                                    continue;
-                                }
-                            }
-
-                            let json = match serde_json::to_string(&normalize_event(event)) {
-                                Ok(j) => j,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to serialize event");
-                                    continue;
-                                }
                             };
                             if socket.send(Message::Text(json.into())).await.is_err() {
                                 break "event_send_failed";
@@ -644,5 +728,115 @@ mod tests {
         let validator = JwtService::new_hs256(b"completely-different-secret-here!", 24);
         let result = validate_ws_token(Some(&token), &validator);
         assert!(result.is_err());
+    }
+
+    /// What a narrow key's stream carries: device events, and none of the
+    /// rule or webhook events beside them, whatever it filters for.
+    #[test]
+    fn a_device_reading_key_streams_device_events_only() {
+        use crate::event_access::tests::{device_event, key, rule_removed, webhook_event};
+        let k = key(&["devices:read"]);
+        assert!(event_frame(&k, device_event(), None, None).is_some());
+        assert!(event_frame(&k, webhook_event(), None, None).is_none());
+        assert!(event_frame(&k, rule_removed(), None, None).is_none());
+
+        let asked = ["custom".to_string(), "rule_removed".to_string()];
+        assert!(event_frame(&k, webhook_event(), Some(&asked), None).is_none());
+        assert!(event_frame(&k, rule_removed(), Some(&asked), None).is_none());
+    }
+
+    #[test]
+    fn an_admin_streams_everything() {
+        use crate::event_access::tests::{device_event, rule_removed, webhook_event};
+        for claims in [
+            crate::event_access::tests::user(Role::Admin),
+            whitelist_claims(),
+        ] {
+            for e in [device_event(), webhook_event(), rule_removed()] {
+                assert!(event_frame(&claims, e, None, None).is_some());
+            }
+        }
+        let frame = event_frame(&whitelist_claims(), webhook_event(), None, None).unwrap();
+        assert!(frame.contains("s3cret-path"));
+    }
+
+    #[test]
+    fn filters_still_apply_to_what_may_be_seen() {
+        use crate::event_access::tests::{device_event, key};
+        let k = key(&["devices:read"]);
+        assert!(event_frame(&k, device_event(), None, Some("light.kitchen")).is_some());
+        assert!(event_frame(&k, device_event(), None, Some("light.hall")).is_none());
+        let other = ["rule_fired".to_string()];
+        assert!(event_frame(&k, device_event(), Some(&other), None).is_none());
+    }
+
+    async fn a_state() -> AppState {
+        let base = std::env::temp_dir().join(format!("hc_api_ws_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&base);
+        let store = hc_state::StateStore::open(
+            &base.join("state.redb").to_string_lossy(),
+            &base.join("history.sqlite").to_string_lossy(),
+        )
+        .await
+        .expect("state store opens");
+        AppState::new(crate::AppStateParams::new(
+            store,
+            hc_core::EventBus::new(16),
+            svc(),
+        ))
+    }
+
+    /// An open stream is closed once its credential no longer holds.
+    #[tokio::test]
+    async fn a_stream_ends_with_its_credential() {
+        let state = a_state().await;
+
+        // A revoked key.
+        let mut k = crate::event_access::tests::key(&["devices:read"]);
+        let Some(Actor::ApiKey { id, .. }) = k.actor.clone() else {
+            unreachable!()
+        };
+        let record = hc_state::api_key_store::ApiKeyRecord {
+            id,
+            prefix: "abcd1234".into(),
+            hash: "unused".into(),
+            owner_uid: uuid::Uuid::new_v4(),
+            scopes: k.scopes.clone(),
+            label: "test".into(),
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+            expires_at: None,
+            allowed_cidrs: vec![],
+            revoked_at: None,
+            display: false,
+            plugin: None,
+        };
+        state.store.create_api_key(&record).await.unwrap();
+        assert_eq!(credential_holds(&state, &k).await, Ok(()));
+        state.store.revoke_api_key(id).await.unwrap();
+        assert_eq!(credential_holds(&state, &k).await, Err("token_revoked"));
+
+        // A key that was never there (deleted).
+        k.actor = Some(Actor::ApiKey {
+            id: uuid::Uuid::new_v4(),
+            owner_uid: uuid::Uuid::new_v4(),
+            label: "gone".into(),
+        });
+        assert_eq!(credential_holds(&state, &k).await, Err("token_revoked"));
+
+        // An expired token.
+        let mut expired = crate::event_access::tests::user(Role::User);
+        expired.exp = 1;
+        assert_eq!(
+            credential_holds(&state, &expired).await,
+            Err("token_expired")
+        );
+
+        // A user who is not there any more.
+        let gone = crate::event_access::tests::user(Role::User);
+        assert_eq!(credential_holds(&state, &gone).await, Err("token_revoked"));
+
+        // The whitelist's synthetic admin has nothing to expire.
+        assert_eq!(credential_holds(&state, &whitelist_claims()).await, Ok(()));
     }
 }

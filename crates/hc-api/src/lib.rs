@@ -37,6 +37,7 @@ pub mod backup;
 pub mod change_audit;
 pub mod config_writer;
 pub mod display_handlers;
+pub mod event_access;
 pub mod event_log;
 pub mod group_store;
 pub mod handlers;
