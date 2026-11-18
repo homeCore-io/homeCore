@@ -644,8 +644,11 @@ async fn main() -> Result<()> {
 
     // The management channel, made here rather than with AppState so the
     // listener below can use it for the manifests plugins publish at startup.
+    // Replies come back on their own private channel, never the public bus:
+    // a `get_config` reply is a plugin's whole config, secrets included.
+    let management_responses = hc_core::ManagementResponses::default();
     let management_rpc =
-        hc_api::management_rpc::ManagementRpc::new(publish_handle.clone(), &pub_bus);
+        hc_api::management_rpc::ManagementRpc::new(publish_handle.clone(), &management_responses);
 
     // A plugin whose manifest asks for `api_scopes` gets an API key from core,
     // sent to it over the management channel. Same timing as the registry
@@ -774,6 +777,7 @@ async fn main() -> Result<()> {
     .with_battery_config(battery_rx)
     .with_alerts(alerts.clone())
     .with_unit_conversions(unit_conversions.clone())
+    .with_management_responses(management_responses.clone())
     .with_alert_channel(config.alerts.notify_channel.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");

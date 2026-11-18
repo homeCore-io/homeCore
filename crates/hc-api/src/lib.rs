@@ -37,6 +37,7 @@ pub mod backup;
 pub mod change_audit;
 pub mod config_writer;
 pub mod display_handlers;
+pub mod event_access;
 pub mod event_log;
 pub mod group_store;
 pub mod handlers;
@@ -78,6 +79,9 @@ pub enum PluginCommand {
     Start,
     Stop,
     Restart,
+    /// Its settings changed: relaunch it if it is running so it reads them.
+    /// A stopped plugin stays stopped and reads them when it next starts.
+    Reload,
 }
 
 /// Per-plugin command sender, indexed by plugin_id.

@@ -374,7 +374,7 @@ impl Push {
                         }
                     }
                     if ![ALARM, SIREN_STATUS, FLOODLIGHT_STATUS, LINK].contains(&m.cmd) {
-                        tracing::debug!(cmd = m.cmd, body = %m.text(Some(&self.key)), "push message not used");
+                        tracing::debug!(cmd = m.cmd, body = %crate::redact::redact(&m.text(Some(&self.key))), "push message not used");
                     }
                     quiet = Duration::ZERO;
                 }

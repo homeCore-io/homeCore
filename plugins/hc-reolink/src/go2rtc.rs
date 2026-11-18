@@ -50,7 +50,13 @@ impl Go2rtc {
         if !name.starts_with("reolink_") {
             bail!("not one of this plugin's streams: {name}");
         }
-        let res = self.http.put(put_url(&self.base, name, src)).send().await?;
+        // The URL carries the camera's password in `src`: never in the error.
+        let res = self
+            .http
+            .put(put_url(&self.base, name, src))
+            .send()
+            .await
+            .map_err(crate::redact::http_error)?;
         if !res.status().is_success() {
             bail!("go2rtc said {}", res.status());
         }

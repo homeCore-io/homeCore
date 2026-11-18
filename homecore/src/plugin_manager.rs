@@ -158,6 +158,8 @@ async fn supervise(
                             break;
                         }
                         Some(PluginCommand::Stop) => {} // already stopped
+                        // Settings changed while stopped: it reads them when it starts.
+                        Some(PluginCommand::Reload) => {}
                         None => return, // channel closed
                     }
                 }
@@ -367,7 +369,7 @@ async fn supervise(
                         stopped_by_command = true;
                         started_at.elapsed()
                     }
-                    Some(PluginCommand::Restart) => {
+                    Some(PluginCommand::Restart | PluginCommand::Reload) => {
                         info!(plugin_id = %entry.id, "Restart command received — killing plugin");
                         kill_child(&mut child, &entry.id).await;
                         backoff_secs = MIN_BACKOFF;
@@ -403,6 +405,8 @@ async fn supervise(
                                 break;
                             }
                             Some(PluginCommand::Stop) => {} // already stopped
+                        // Settings changed while stopped: it reads them when it starts.
+                        Some(PluginCommand::Reload) => {}
                             None => return,
                         }
                     }
@@ -527,7 +531,7 @@ async fn backoff_sleep(
         _ = tokio::time::sleep(Duration::from_secs(secs)) => true,
         cmd = cmd_rx.recv() => {
             match cmd {
-                Some(PluginCommand::Start | PluginCommand::Restart) => true,
+                Some(PluginCommand::Start | PluginCommand::Restart | PluginCommand::Reload) => true,
                 Some(PluginCommand::Stop) => true, // will re-check in main loop
                 None => false,
             }
@@ -718,5 +722,89 @@ mod quiet_tests {
             quiet(t0, Some(beat), beat + Span::seconds(301)),
             Some("has stopped answering")
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reload_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stand-in plugin that leaves a mark each time it is launched.
+    fn fake_plugin(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+        let bin = dir.join("plugin.sh");
+        std::fs::write(&bin, "#!/bin/sh\ntouch \"$1.ran\"\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.join("plugin.toml");
+        std::fs::write(&config, "").unwrap();
+        (bin, config)
+    }
+
+    async fn launched(mark: &std::path::Path, within: Duration) -> bool {
+        let t = Instant::now();
+        while t.elapsed() < within {
+            if mark.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Saving a stopped plugin's settings sends a reload. It must stay
+    /// stopped, whether it was turned off at startup or stopped by hand,
+    /// and still start when asked.
+    #[tokio::test]
+    async fn a_reload_never_starts_a_stopped_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (binary, config) = fake_plugin(dir.path());
+        let mark = PathBuf::from(format!("{}.ran", config.display()));
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let entry = PluginProcess {
+            id: "plugin.test".into(),
+            binary,
+            config,
+            enabled: false,
+        };
+        let task = tokio::spawn(supervise(
+            entry,
+            cmd_rx,
+            Arc::new(RwLock::new(HashMap::new())),
+            EventBus::new(16),
+            shutdown_rx,
+        ));
+
+        // Turned off at startup.
+        cmd_tx.send(PluginCommand::Reload).await.unwrap();
+        assert!(
+            !launched(&mark, Duration::from_millis(600)).await,
+            "a reload started a turned-off plugin"
+        );
+
+        cmd_tx.send(PluginCommand::Start).await.unwrap();
+        assert!(
+            launched(&mark, Duration::from_secs(5)).await,
+            "start did not launch it"
+        );
+
+        // Stopped by hand.
+        cmd_tx.send(PluginCommand::Stop).await.unwrap();
+        tokio::time::sleep(SHUTDOWN_GRACE + Duration::from_millis(500)).await;
+        std::fs::remove_file(&mark).unwrap();
+        cmd_tx.send(PluginCommand::Reload).await.unwrap();
+        assert!(
+            !launched(&mark, Duration::from_millis(600)).await,
+            "a reload started a stopped plugin"
+        );
+
+        cmd_tx.send(PluginCommand::Start).await.unwrap();
+        assert!(
+            launched(&mark, Duration::from_secs(5)).await,
+            "start after stop did not launch it"
+        );
+
+        shutdown_tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
     }
 }

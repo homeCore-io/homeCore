@@ -142,7 +142,7 @@ impl Sirens {
                 let ends = match host.api.one(api::siren_manual(channel, true)).await {
                     Ok(_) => None,
                     Err(e) => {
-                        warn!(device_id = %device, error = %e, "manual siren refused; sounding it a few times instead");
+                        warn!(device_id = %device, error = %crate::redact::redact(&e.to_string()), "manual siren refused; sounding it a few times instead");
                         host.api.one(api::siren_times(channel, self.times)).await?;
                         Some(Instant::now() + self.play * self.times)
                     }
@@ -262,7 +262,7 @@ impl Sirens {
                     return;
                 }
                 Err(e) => {
-                    warn!(device_id = %device, error = %e, attempt, "siren didn't stop");
+                    warn!(device_id = %device, error = %crate::redact::redact(&e.to_string()), attempt, "siren didn't stop");
                     if attempt < STOP_TRIES {
                         tokio::time::sleep(self.retry).await;
                     }
@@ -313,7 +313,7 @@ impl Sirens {
             .collect();
         for (device, host, channel) in ours {
             if let Err(e) = self.stop(&host, channel, &device, None).await {
-                warn!(device_id = %device, error = %e, "siren not stopped on the way out");
+                warn!(device_id = %device, error = %crate::redact::redact(&e.to_string()), "siren not stopped on the way out");
             }
         }
     }

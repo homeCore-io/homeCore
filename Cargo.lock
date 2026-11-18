@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.116"
+version = "0.1.117"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -2217,6 +2217,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
  "tower",
  "tower-service",
