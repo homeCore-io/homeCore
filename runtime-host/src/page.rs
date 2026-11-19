@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hc_api_types::plugin_runtimes::{ConnectionKey, HelloRequest};
+use hc_api_types::plugin_runtimes::{platform_of, ConnectionKey, HelloRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -114,13 +114,15 @@ pub fn broker_host(key: &ConnectionKey, pin: &Option<String>) -> String {
 /// Test a key end to end. On success returns the runtime's name in homeCore.
 pub async fn test_key(shared: &Shared, key: &ConnectionKey) -> anyhow::Result<String> {
     let caps = &shared.hello.capabilities;
-    if key.kind != caps.kind || key.abi != caps.abi {
+    // Compared by platform: a key made before interpreters came from the
+    // registry names the Python it was pinned to (`cp312-manylinux_2_28`), and
+    // that Python is no longer the runtime's business.
+    let (keyed, here) = (platform_of(&key.abi), platform_of(&caps.abi));
+    if key.kind != caps.kind || keyed != here {
         anyhow::bail!(
-            "this key is for a {} runtime ({}), and this container hosts {} ({})",
+            "this key is for a {} runtime ({keyed}), and this container hosts {} ({here})",
             key.kind,
-            key.abi,
             caps.kind,
-            caps.abi
         );
     }
     let client = CoreClient::new(shared.http.clone(), &key.url, &key.runtime_id, &key.secret);
@@ -367,7 +369,7 @@ async function refresh(){
   for (const pl of s.plugins){
     const li=document.createElement('li'); if(pl.looping) li.className='looping';
     const dot=document.createElement('span'); dot.className='dot'; dot.setAttribute('aria-hidden','true');
-    li.append(dot, text(document.createElement('b'),pl.plugin_id), Object.assign(text(document.createElement('span'),pl.version),{className:'v'}), Object.assign(text(document.createElement('span'), pl.looping?'Keeps stopping; restarting':runFor(pl.since)),{className:'s'}));
+    li.append(dot, text(document.createElement('b'),pl.plugin_id), Object.assign(text(document.createElement('span'),pl.version+(pl.interpreter?' on '+pl.interpreter:'')),{className:'v'}), Object.assign(text(document.createElement('span'), pl.looping?'Keeps stopping; restarting':runFor(pl.since)),{className:'s'}));
     ul.append(li);
   }
   $('noplugins').classList.toggle('hidden', s.plugins.length>0);

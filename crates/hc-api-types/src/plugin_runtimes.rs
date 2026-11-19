@@ -15,27 +15,60 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// What a runtime can host: the language, the ABI its artifacts must match, and
-/// its architecture. An artifact is placed on a runtime only when all three
-/// match.
+/// What a runtime can host: the language, the platform its artifacts must be
+/// built for, and its architecture.
+///
+/// A python runtime brings no Python of its own. Its `abi` is only the platform
+/// tag its image's C library satisfies (`manylinux_2_28`); the interpreter comes
+/// from the registry, chosen per plugin by the series in the plugin's own ABI
+/// tag (`cp313` of `cp313-manylinux_2_28`). See `docs/pythonInterpretersPlan.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
     /// e.g. `python`.
     pub kind: String,
-    /// e.g. `cp312-manylinux_2_28`.
+    /// e.g. `manylinux_2_28`.
     pub abi: String,
     /// e.g. `x86_64`, `aarch64`.
     pub arch: String,
 }
 
-/// The languages a runtime can be added for, with the ABI each pins. One ABI per
-/// language per homeCore minor, so the matrix stays small and an ABI change is a
-/// release note rather than a drift.
-pub const KINDS: &[(&str, &str)] = &[("python", "cp312-manylinux_2_28")];
+/// The languages a runtime can be added for, with the platform each runtime
+/// image provides.
+pub const KINDS: &[(&str, &str)] = &[("python", "manylinux_2_28")];
 
-/// The ABI homeCore pins for a runtime kind, if it supports that kind.
+/// The platform homeCore expects of a runtime kind, if it supports that kind.
 pub fn abi_for(kind: &str) -> Option<&'static str> {
     KINDS.iter().find(|(k, _)| *k == kind).map(|(_, abi)| *abi)
+}
+
+/// The platform part of an ABI tag: `manylinux_2_28` of `cp313-manylinux_2_28`.
+/// A tag with no interpreter series is all platform.
+pub fn platform_of(abi: &str) -> &str {
+    match series_of(abi) {
+        Some(series) => abi[series.len()..].trim_start_matches('-'),
+        None => abi,
+    }
+}
+
+/// The interpreter series an ABI tag names: `cp313` of `cp313-manylinux_2_28`.
+/// None for a bare platform tag.
+pub fn series_of(abi: &str) -> Option<&str> {
+    let (head, _) = abi.split_once('-')?;
+    let digits = head.strip_prefix("cp")?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(head)
+}
+
+/// The interpreter a placed plugin runs on, as core chose it from the signed
+/// index. The runtime fetches it through core and checks the bytes against
+/// `sha256`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterpreterRef {
+    /// e.g. `python`.
+    pub kind: String,
+    /// e.g. `3.13.18`.
+    pub version: String,
+    /// Hex sha256 of the interpreter archive.
+    pub sha256: String,
 }
 
 /// Everything a runtime needs to connect, in one string an operator copies once.
@@ -213,7 +246,7 @@ mod tests {
             username: "plugin.python-rt4f2a9c17".into(),
             secret: "hc_sk_abc".into(),
             kind: "python".into(),
-            abi: "cp312-manylinux_2_28".into(),
+            abi: "manylinux_2_28".into(),
         }
     }
 
@@ -244,7 +277,17 @@ mod tests {
 
     #[test]
     fn only_supported_kinds_have_an_abi() {
-        assert_eq!(abi_for("python"), Some("cp312-manylinux_2_28"));
+        assert_eq!(abi_for("python"), Some("manylinux_2_28"));
         assert_eq!(abi_for("node"), None);
+    }
+
+    #[test]
+    fn an_abi_tag_splits_into_series_and_platform() {
+        assert_eq!(series_of("cp313-manylinux_2_28"), Some("cp313"));
+        assert_eq!(platform_of("cp313-manylinux_2_28"), "manylinux_2_28");
+        assert_eq!(series_of("manylinux_2_28"), None);
+        assert_eq!(platform_of("manylinux_2_28"), "manylinux_2_28");
+        assert_eq!(series_of("node22"), None);
+        assert_eq!(series_of("cpx-manylinux_2_28"), None);
     }
 }

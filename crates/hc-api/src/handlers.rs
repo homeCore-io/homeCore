@@ -5109,7 +5109,7 @@ pub async fn install_plugin(
         // Where does this run? A plugin whose artifact targets a runtime is
         // dispatched there rather than unpacked here, and the admin who clicked
         // Install does not need to know which case they hit.
-        let pv = match reg.version_of(id, version, s.homecore_version).await {
+        let (pv, index) = match reg.version_and_index(id, version, s.homecore_version).await {
             Ok(v) => v,
             Err(e) => {
                 return (
@@ -5141,11 +5141,27 @@ pub async fn install_plugin(
             .all_placements()
             .unwrap_or_default();
         let candidates = crate::placement::candidates(&runtime_records, &placements, id);
+        // A runtime brings only a platform; the interpreter comes from the
+        // index. So a build is on offer to a runtime when its platform matches
+        // and the index has an interpreter for its series.
         let runtime_artifacts: Vec<(&str, &str, &str)> = pv
             .artifacts
             .iter()
             .filter(|a| !a.is_native())
-            .map(|a| (a.runtime.as_str(), a.abi.as_str(), a.arch.as_str()))
+            .filter(|a| {
+                hc_api_types::plugin_runtimes::series_of(&a.abi).is_some_and(|series| {
+                    index
+                        .newest_interpreter(&a.runtime, series, &a.arch)
+                        .is_some()
+                })
+            })
+            .map(|a| {
+                (
+                    a.runtime.as_str(),
+                    hc_api_types::plugin_runtimes::platform_of(&a.abi),
+                    a.arch.as_str(),
+                )
+            })
             .collect();
         let offered = crate::placement::Offered {
             native_for_this_host: pv
@@ -5182,7 +5198,12 @@ pub async fn install_plugin(
                 };
                 // Candidates are only runtimes that reported their arch.
                 let arch = rec.arch.as_deref().unwrap_or_default();
-                let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, arch) else {
+                let Some((art, interp)) = index.runtime_build(
+                    &pv,
+                    &rec.kind,
+                    hc_api_types::plugin_runtimes::platform_of(&rec.abi),
+                    arch,
+                ) else {
                     return (
                         StatusCode::CONFLICT,
                         Json(json!({
@@ -5202,6 +5223,12 @@ pub async fn install_plugin(
                     &pv.version,
                     &art.url,
                     &art.sha256,
+                    Some(hc_state::plugin_runtime_store::PlacedInterpreter {
+                        kind: interp.kind.clone(),
+                        version: interp.version.clone(),
+                        abi: interp.abi.clone(),
+                        sha256: interp.sha256.clone(),
+                    }),
                 ) {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -5217,6 +5244,7 @@ pub async fn install_plugin(
                         "placed_on": runtime_id,
                         "plugin_id": id,
                         "version": pv.version,
+                        "interpreter": format!("{} {}", interp.kind, interp.version),
                         "note": "The runtime installs and starts it on its next reconcile.",
                     })),
                 )

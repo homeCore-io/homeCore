@@ -5,12 +5,22 @@
 //! placement change rather than a re-download:
 //!
 //! ```text
-//! <data>/plugins/plugin.foo/0.2.1/
+//! <data>/plugins/plugin.foo/0.2.1+python-3.13.18/
 //! ├── pkg/          the unpacked artifact
 //! ├── env/          whatever the adapter's create_env made
 //! ├── config.toml   what core sent, verbatim
+//! ├── artifact.tar.zst  the package, for an interpreter update to reuse
+//! ├── .interpreter  the interpreter env/ was made from, when there is one
 //! └── .installed    written last, and only on success
+//! <data>/interpreters/python-3.13.18/
+//! ├── python/       the unpacked interpreter
+//! └── .installed
 //! ```
+//!
+//! A directory is named for the plugin version and the interpreter together,
+//! because an environment belongs to the interpreter it was made from. An
+//! interpreter update is a new directory beside the old one, made from the
+//! wheels the package already carries.
 //!
 //! The marker is written last on purpose. A venv that was half-built when the
 //! container was killed is indistinguishable from a finished one by looking at
@@ -112,16 +122,164 @@ fn check_path_component(what: &str, value: &str) -> Result<()> {
 }
 
 /// True when this exact version finished installing.
-pub fn is_installed(root: &Path, plugin_id: &str, version: &str) -> bool {
-    version_dir(root, plugin_id, version).is_ok_and(|d| d.join(".installed").exists())
+pub fn is_installed(root: &Path, plugin_id: &str, key: &str) -> bool {
+    version_dir(root, plugin_id, key).is_ok_and(|d| d.join(".installed").exists())
 }
 
-/// Unpack, provision an environment, and write the config.
+// ── Interpreters ─────────────────────────────────────────────────────────────
+
+/// Where one interpreter is unpacked.
+pub fn interpreter_dir(root: &Path, kind: &str, version: &str) -> Result<PathBuf> {
+    check_path_component("interpreter kind", kind)?;
+    check_path_component("interpreter version", version)?;
+    Ok(root.join("interpreters").join(format!("{kind}-{version}")))
+}
+
+/// True when this interpreter finished unpacking.
+pub fn is_interpreter_installed(root: &Path, kind: &str, version: &str) -> bool {
+    interpreter_dir(root, kind, version).is_ok_and(|d| d.join(".installed").exists())
+}
+
+/// Unpack an interpreter archive, marking it installed last.
 ///
-/// Any failure removes the version directory. Leaving a partial install behind
-/// would make the next reconcile skip it as already present, and a plugin that
-/// is missing half its dependencies fails at import time with nothing pointing
-/// back to the install that was interrupted.
+/// Unpacked into a scratch directory and renamed into place, so a host killed
+/// halfway leaves something the next attempt clears rather than a directory
+/// that looks finished.
+pub fn install_interpreter(
+    root: &Path,
+    kind: &str,
+    version: &str,
+    archive: &[u8],
+) -> Result<PathBuf> {
+    let dir = interpreter_dir(root, kind, version)?;
+    let scratch = root
+        .join("interpreters")
+        .join(format!("{kind}-{version}.partial"));
+    for stale in [&dir, &scratch] {
+        if stale.exists() {
+            std::fs::remove_dir_all(stale)
+                .with_context(|| format!("clearing {}", stale.display()))?;
+        }
+    }
+    std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
+    let unpacked = unpack_tar_zst(archive, &scratch).and_then(|()| {
+        std::fs::write(scratch.join(".installed"), version)
+            .with_context(|| format!("marking {} installed", scratch.display()))?;
+        std::fs::rename(&scratch, &dir)
+            .with_context(|| format!("moving {} into place", dir.display()))
+    });
+    if let Err(e) = unpacked {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(e);
+    }
+    Ok(dir)
+}
+
+/// Remove interpreters no installed plugin directory was made from.
+///
+/// Returns the names removed. An interpreter is kept while any version
+/// directory of any plugin still records it, so a rollback target keeps its
+/// interpreter.
+pub fn prune_interpreters(root: &Path) -> Vec<String> {
+    let mut in_use = std::collections::HashSet::new();
+    for plugin in read_dirs(&root.join("plugins")) {
+        for version in read_dirs(&plugin) {
+            if let Ok(name) = std::fs::read_to_string(version.join(".interpreter")) {
+                in_use.insert(name.trim().to_string());
+            }
+        }
+    }
+    let mut removed = Vec::new();
+    for dir in read_dirs(&root.join("interpreters")) {
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        if in_use.contains(&name) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed.push(name),
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "could not remove an unused interpreter")
+            }
+        }
+    }
+    removed
+}
+
+/// Keep the running install of a plugin and the newest other one, for
+/// rollback, and remove the rest. Returns the directory names removed.
+///
+/// Only finished installs are candidates: a plugin keeps its own files beside
+/// them (the Assistant's `data/`), and those are not this function's to touch.
+pub fn prune_versions(root: &Path, plugin_id: &str, current: &str) -> Vec<String> {
+    let Ok(plugin) = plugin_dir(root, plugin_id) else {
+        return Vec::new();
+    };
+    let mut others: Vec<(std::time::SystemTime, PathBuf)> = read_dirs(&plugin)
+        .into_iter()
+        .filter(|d| d.join(".installed").is_file())
+        .filter(|d| d.file_name().is_some_and(|n| n != current))
+        .map(|d| {
+            let when = std::fs::metadata(d.join(".installed"))
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (when, d)
+        })
+        .collect();
+    others.sort_by_key(|o| std::cmp::Reverse(o.0));
+    let mut removed = Vec::new();
+    for (_, dir) in others.into_iter().skip(1) {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed.push(name),
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "could not remove an old install")
+            }
+        }
+    }
+    removed
+}
+
+fn read_dirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What to install, and where.
+#[derive(Debug, Clone)]
+pub struct Target<'a> {
+    pub plugin_id: &'a str,
+    pub version: &'a str,
+    /// The directory name under the plugin's: the version, plus the
+    /// interpreter when there is one (see [`install_key`]).
+    pub key: &'a str,
+    /// The unpacked interpreter, handed to the adapter as `{interpreter}`.
+    pub interpreter: Option<&'a Path>,
+}
+
+/// The directory name for a plugin version on an interpreter.
+pub fn install_key(version: &str, interpreter: Option<(&str, &str)>) -> String {
+    match interpreter {
+        Some((kind, iv)) => format!("{version}+{kind}-{iv}"),
+        None => version.to_string(),
+    }
+}
+
+/// Unpack, provision an environment, and write the config, with no
+/// interpreter: the adapter brings its own. What the tests that are not about
+/// interpreters install with.
+#[cfg(test)]
 pub async fn install(
     root: &Path,
     adapter: &Adapter,
@@ -130,12 +288,34 @@ pub async fn install(
     artifact: &[u8],
     config: &str,
 ) -> Result<Installed> {
-    let dir = version_dir(root, plugin_id, version)?;
+    let target = Target {
+        plugin_id,
+        version,
+        key: version,
+        interpreter: None,
+    };
+    install_target(root, adapter, &target, artifact, config).await
+}
+
+/// Unpack, provision an environment, and write the config.
+///
+/// Any failure removes the version directory. Leaving a partial install behind
+/// would make the next reconcile skip it as already present, and a plugin that
+/// is missing half its dependencies fails at import time with nothing pointing
+/// back to the install that was interrupted.
+pub async fn install_target(
+    root: &Path,
+    adapter: &Adapter,
+    target: &Target<'_>,
+    artifact: &[u8],
+    config: &str,
+) -> Result<Installed> {
+    let dir = version_dir(root, target.plugin_id, target.key)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .with_context(|| format!("clearing a previous attempt at {}", dir.display()))?;
     }
-    match install_into(&dir, adapter, plugin_id, version, artifact, config).await {
+    match install_into(&dir, adapter, target, artifact, config).await {
         Ok(installed) => Ok(installed),
         Err(e) => {
             if let Err(cleanup) = std::fs::remove_dir_all(&dir) {
@@ -150,14 +330,18 @@ pub async fn install(
 async fn install_into(
     dir: &Path,
     adapter: &Adapter,
-    plugin_id: &str,
-    version: &str,
+    target: &Target<'_>,
     artifact: &[u8],
     config: &str,
 ) -> Result<Installed> {
+    let (plugin_id, version) = (target.plugin_id, target.version);
     let pkg = dir.join("pkg");
     std::fs::create_dir_all(&pkg).with_context(|| format!("creating {}", pkg.display()))?;
     unpack_tar_zst(artifact, &pkg)?;
+    // Kept so an interpreter update can make a new environment from the same
+    // package without downloading it again.
+    std::fs::write(dir.join("artifact.tar.zst"), artifact)
+        .with_context(|| format!("keeping the artifact in {}", dir.display()))?;
 
     let manifest = read_manifest(&pkg)?;
     // The artifact says what it is; core said what it asked for. A mismatch
@@ -179,6 +363,9 @@ async fn install_into(
         ("wheelhouse", pkg.join("wheelhouse").display().to_string()),
         ("entrypoint", manifest.entrypoint.clone()),
     ]);
+    if let Some(interp) = target.interpreter {
+        vars.insert("interpreter", interp.display().to_string());
+    }
     if let Some(package) = &manifest.package {
         vars.insert("package", package.clone());
         vars.insert(
@@ -194,6 +381,14 @@ async fn install_into(
 
     let config_path = dir.join("config.toml");
     write_config(&config_path, config)?;
+
+    if let Some(interp) = target.interpreter.and_then(Path::file_name) {
+        std::fs::write(
+            dir.join(".interpreter"),
+            interp.to_string_lossy().as_bytes(),
+        )
+        .with_context(|| format!("recording the interpreter of {}", dir.display()))?;
+    }
 
     // Last, and only now.
     std::fs::write(dir.join(".installed"), version)
@@ -214,13 +409,13 @@ async fn install_into(
 /// The manifest is re-read rather than remembered: the host restarts far more
 /// often than a plugin is installed, and a cached entrypoint would be one more
 /// thing that can disagree with what is actually there.
-pub fn existing(root: &Path, plugin_id: &str, version: &str) -> Result<Installed> {
-    let dir = version_dir(root, plugin_id, version)?;
+pub fn existing(root: &Path, plugin_id: &str, key: &str) -> Result<Installed> {
+    let dir = version_dir(root, plugin_id, key)?;
     let pkg = dir.join("pkg");
     let manifest = read_manifest(&pkg)?;
     Ok(Installed {
         plugin_id: plugin_id.to_string(),
-        version: version.to_string(),
+        version: manifest.version.clone(),
         env: dir.join("env"),
         ui_dir: ui_dir(&pkg, &manifest),
         entrypoint: manifest.entrypoint,
@@ -575,6 +770,39 @@ package    = "hc-foo"
                 "HC_PLUGIN_UI_DIR".to_string(),
                 pkg.join("ui").display().to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_the_current_install_the_one_before_and_the_plugins_own_files() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin = plugin_dir(root.path(), "plugin.foo").unwrap();
+        for (i, key) in ["0.1.0", "0.2.0", "0.3.0", "0.4.0"].iter().enumerate() {
+            let d = plugin.join(key);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(".installed"), key).unwrap();
+            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000 + i as u64);
+            std::fs::File::options()
+                .write(true)
+                .open(d.join(".installed"))
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        std::fs::create_dir_all(plugin.join("data")).unwrap();
+        std::fs::write(plugin.join("data/history.json"), "[]").unwrap();
+
+        let mut removed = prune_versions(root.path(), "plugin.foo", "0.2.0");
+        removed.sort();
+        assert_eq!(removed, vec!["0.1.0", "0.3.0"]);
+        assert!(plugin.join("0.2.0").exists(), "the running one stays");
+        assert!(
+            plugin.join("0.4.0").exists(),
+            "the newest other one stays for rollback"
+        );
+        assert!(
+            plugin.join("data/history.json").exists(),
+            "the plugin's own files stay"
         );
     }
 

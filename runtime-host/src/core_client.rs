@@ -9,7 +9,7 @@
 //! exactly one runtime. There is no request here that could name someone else's.
 
 use anyhow::{bail, Context, Result};
-use hc_api_types::plugin_runtimes::{HelloRequest, HelloResponse};
+use hc_api_types::plugin_runtimes::{HelloRequest, HelloResponse, InterpreterRef};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +24,23 @@ pub struct Desired {
     /// broker credential. Written as is, except that a `[homecore] broker_host`
     /// unreachable from the container is replaced (see `broker.rs`).
     pub config: String,
+    /// The interpreter to make its environment from, chosen by core from the
+    /// signed index.
+    #[serde(default)]
+    pub interpreter: Option<InterpreterRef>,
+}
+
+impl Desired {
+    /// The directory this placement installs into: its version and its
+    /// interpreter. A change of either is a new install.
+    pub fn install_key(&self) -> String {
+        crate::install::install_key(
+            &self.version,
+            self.interpreter
+                .as_ref()
+                .map(|i| (i.kind.as_str(), i.version.as_str())),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,10 +182,32 @@ impl CoreClient {
             "{}/api/v1/plugin-runtimes/{}/artifacts/{}",
             self.base_url, self.runtime_id, plugin_id
         );
+        self.fetch_verified(&url, plugin_id, expected_sha256).await
+    }
+
+    /// Fetch an interpreter a placement names, verified the same way.
+    pub async fn interpreter(&self, interp: &InterpreterRef) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/api/v1/plugin-runtimes/{}/interpreters/{}/{}",
+            self.base_url, self.runtime_id, interp.kind, interp.version
+        );
+        let what = format!("{} {}", interp.kind, interp.version);
+        self.fetch_verified(&url, &what, &interp.sha256).await
+    }
+
+    async fn fetch_verified(
+        &self,
+        url: &str,
+        plugin_id: &str,
+        expected_sha256: &str,
+    ) -> Result<Vec<u8>> {
         let resp = self
             .http
-            .get(&url)
+            .get(url)
             .bearer_auth(&self.secret)
+            // An interpreter is tens of megabytes; the client's default timeout
+            // is sized for API calls.
+            .timeout(std::time::Duration::from_secs(600))
             .send()
             .await
             .with_context(|| format!("fetching the artifact for {plugin_id}"))?;

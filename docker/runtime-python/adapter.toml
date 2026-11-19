@@ -2,21 +2,23 @@
 # about Python; it substitutes these placeholders into argv and runs them, with
 # no shell in between. See runtime-host/src/adapter.rs.
 #
-# kind and abi must match what the host advertises at enrollment
-# (HC_RUNTIME_KIND, HC_RUNTIME_ABI in Dockerfile.runtime-python), or the host
-# refuses to start: artifacts are matched against what was advertised, and a
-# mismatch would only show up later as a plugin that cannot import.
+# kind and abi must match what the host advertises (HC_RUNTIME_KIND,
+# HC_RUNTIME_ABI in Dockerfile.runtime-python), or the host refuses to start.
+# abi is the platform only: the Python a plugin runs on is the interpreter
+# homeCore placed it with, unpacked at {interpreter}. See
+# docs/pythonInterpretersPlan.md.
 
 kind = "python"
-abi  = "cp312-manylinux_2_28"
+abi  = "manylinux_2_28"
 
 # One venv per plugin, so two plugins that want different versions of a library
 # never share one.
-create_env = ["python3", "-m", "venv", "{env}"]
+create_env = ["uv", "venv", "--quiet", "--python", "{interpreter}/python/bin/python3", "{env}"]
 
 # Offline. The artifact carries every wheel it needs; nothing is downloaded.
-install    = ["{env}/bin/pip", "install", "--no-index", "--no-cache-dir",
-              "--find-links", "{wheelhouse}", "{plugin_wheel}"]
+install    = ["uv", "pip", "install", "--quiet", "--offline", "--no-index",
+              "--find-links", "{wheelhouse}", "--python", "{env}/bin/python",
+              "{plugin_wheel}"]
 
 # Every plugin reads its config path from argv[1], whatever its language.
 launch     = ["{env}/bin/python", "-m", "{entrypoint}", "{config}"]

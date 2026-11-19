@@ -15,14 +15,17 @@
 #                     artifacts, supervision. The same binary for every language.
 #   adapter.toml      the only Python-specific part: how to make a venv, install
 #                     an artifact offline, and launch a plugin.
-#   Python 3.12       on Debian (glibc), because manylinux wheels are what
-#                     effectively every package publishes; on musl the long tail
-#                     turns into source builds the artifacts refuse to do.
+#   uv                makes each plugin's venv and installs its wheels into it.
+#   Debian (glibc)    because manylinux wheels are what effectively every
+#                     package publishes; on musl the long tail turns into source
+#                     builds the artifacts refuse to do.
 #
-# The interpreter is not where plugin code comes from. Each plugin arrives as a
-# signed artifact with its own wheels, including the SDK, and installs into its
-# own venv. Bumping the base image's Python minor would change the ABI, which is
-# why HC_RUNTIME_ABI is pinned here and must be bumped with it.
+# There is no Python here. Each plugin is built for a Python minor and placed
+# with an interpreter from the registry (homeCore-io/interpreters), which the
+# host fetches through homeCore and keeps in the data volume, one copy per
+# version. The image only promises a C library new enough for manylinux_2_28
+# wheels (bookworm has glibc 2.36), which is what HC_RUNTIME_ABI says. See
+# docs/pythonInterpretersPlan.md.
 #
 # Build from the core repo root:
 #
@@ -55,7 +58,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     strip /hc-runtime-host
 
 # ── Stage 2: the runtime ─────────────────────────────────────────────────────
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
+FROM ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 AS uv
+
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 # tini is PID 1: it forwards `docker stop`'s SIGTERM to the host, which stops
 # its plugins before exiting, and reaps anything a plugin leaves behind.
@@ -66,16 +71,23 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=host /hc-runtime-host            /usr/local/bin/hc-runtime-host
+COPY --from=uv   /uv                         /usr/local/bin/uv
 COPY docker/runtime-python/adapter.toml       /etc/hc-runtime/adapter.toml
 COPY docker/entrypoint-runtime.sh             /entrypoint.sh
 
 # What this image can host. The host refuses to start if adapter.toml disagrees.
 # HC_RUNTIME_ARCH is left to the host, which reports the arch it was built for.
+# uv: its cache on the volume, beside the venvs, so plugins that share a wheel
+# store it once (hardlinked). It never downloads a Python or reads a config
+# file a plugin could have left behind.
 ENV HC_RUNTIME_KIND=python \
-    HC_RUNTIME_ABI=cp312-manylinux_2_28 \
+    HC_RUNTIME_ABI=manylinux_2_28 \
     HC_RUNTIME_DATA=/var/lib/hc-runtime \
     HC_RUNTIME_ADAPTER=/etc/hc-runtime/adapter.toml \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_CACHE_DIR=/var/lib/hc-runtime/uv-cache \
+    UV_LINK_MODE=hardlink \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_NO_CONFIG=1 \
     PYTHONUNBUFFERED=1
 
 # The runtime's own page: paste the key, see what it hosts.

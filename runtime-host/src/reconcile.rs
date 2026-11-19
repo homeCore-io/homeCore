@@ -24,6 +24,11 @@ use tokio::sync::watch;
 /// A plugin this host currently has running.
 struct Running {
     version: String,
+    /// Its install directory: version and interpreter. A placement whose key
+    /// differs is a new install, even at the same plugin version.
+    key: String,
+    /// e.g. `python 3.13.18`, for the runtime's page.
+    interpreter: Option<String>,
     /// The config it was launched with. A plugin reads its config once, at
     /// startup, so a change here is a restart rather than a no-op.
     config: String,
@@ -38,6 +43,8 @@ struct Running {
 pub struct Hosted {
     pub plugin_id: String,
     pub version: String,
+    /// e.g. `python 3.13.18`.
+    pub interpreter: Option<String>,
     pub since: chrono::DateTime<chrono::Utc>,
 }
 
@@ -110,6 +117,7 @@ impl Reconciler {
             .map(|(id, r)| Hosted {
                 plugin_id: id.clone(),
                 version: r.version.clone(),
+                interpreter: r.interpreter.clone(),
                 since: r.since,
             })
             .collect();
@@ -179,13 +187,28 @@ impl Reconciler {
         for d in desired {
             match self.converge_one(&d).await {
                 Ok(Outcome::Unchanged) => pass.unchanged.push(d.plugin_id),
-                Ok(Outcome::Started) => pass.started.push(d.plugin_id),
-                Ok(Outcome::Restarted) => pass.restarted.push(d.plugin_id),
+                Ok(outcome) => {
+                    // A new install is running: keep it and the one before it,
+                    // for rollback, and drop anything older.
+                    for old in install::prune_versions(&self.root, &d.plugin_id, &d.install_key()) {
+                        tracing::info!(plugin_id = %d.plugin_id, install = %old, "removed an old install");
+                    }
+                    if outcome == Outcome::Started {
+                        pass.started.push(d.plugin_id);
+                    } else {
+                        pass.restarted.push(d.plugin_id);
+                    }
+                }
                 Err(e) => {
                     tracing::error!(plugin_id = %d.plugin_id, error = %format!("{e:#}"),
-                        "could not provision a placed plugin — will retry");
+                        "could not provision a placed plugin; will retry");
                     pass.failed.push((d.plugin_id, format!("{e:#}")));
                 }
+            }
+        }
+        if pass.changed_anything() {
+            for gone in install::prune_interpreters(&self.root) {
+                tracing::info!(interpreter = %gone, "removed an interpreter nothing here uses");
             }
         }
         pass
@@ -193,7 +216,7 @@ impl Reconciler {
 
     async fn converge_one(&mut self, d: &Desired) -> Result<Outcome> {
         if let Some(running) = self.running.get(&d.plugin_id) {
-            if running.version == d.version && running.config == d.config {
+            if running.key == d.install_key() && running.config == d.config {
                 return Ok(Outcome::Unchanged);
             }
         }
@@ -223,23 +246,73 @@ impl Reconciler {
     /// The config is written on every pass regardless: core owns it and may
     /// change it without the version changing.
     async fn provision(&self, d: &Desired) -> Result<Installed> {
-        if install::is_installed(&self.root, &d.plugin_id, &d.version) {
-            let installed = install::existing(&self.root, &d.plugin_id, &d.version)?;
+        let key = d.install_key();
+        if install::is_installed(&self.root, &d.plugin_id, &key) {
+            let installed = install::existing(&self.root, &d.plugin_id, &key)?;
             install::write_config(&installed.config, &d.config)?;
             return Ok(installed);
         }
 
-        tracing::info!(plugin_id = %d.plugin_id, version = %d.version, "fetching artifact");
-        let bytes = self.client.artifact(&d.plugin_id, &d.sha256).await?;
-        install::install(
+        let interpreter = match &d.interpreter {
+            Some(i) => Some(self.interpreter(i).await?),
+            None => None,
+        };
+
+        // A new interpreter for a version already here needs no download: the
+        // package the old install was made from carries every wheel.
+        let bytes = match self.reusable_artifact(d) {
+            Some(bytes) => bytes,
+            None => {
+                tracing::info!(plugin_id = %d.plugin_id, version = %d.version, "fetching artifact");
+                self.client.artifact(&d.plugin_id, &d.sha256).await?
+            }
+        };
+        install::install_target(
             &self.root,
             &self.adapter,
-            &d.plugin_id,
-            &d.version,
+            &install::Target {
+                plugin_id: &d.plugin_id,
+                version: &d.version,
+                key: &key,
+                interpreter: interpreter.as_deref(),
+            },
             &bytes,
             &d.config,
         )
         .await
+    }
+
+    /// The interpreter a placement names, unpacked here, fetching it through
+    /// core the first time.
+    async fn interpreter(
+        &self,
+        i: &hc_api_types::plugin_runtimes::InterpreterRef,
+    ) -> Result<PathBuf> {
+        if install::is_interpreter_installed(&self.root, &i.kind, &i.version) {
+            return install::interpreter_dir(&self.root, &i.kind, &i.version);
+        }
+        tracing::info!(kind = %i.kind, version = %i.version, "fetching interpreter");
+        let bytes = self
+            .client
+            .interpreter(i)
+            .await
+            .with_context(|| format!("fetching {} {}", i.kind, i.version))?;
+        install::install_interpreter(&self.root, &i.kind, &i.version, &bytes)
+    }
+
+    /// The artifact bytes of this version, rebuilt from an install already on
+    /// disk, when its sha256 still matches what core placed.
+    fn reusable_artifact(&self, d: &Desired) -> Option<Vec<u8>> {
+        let saved = install::plugin_dir(&self.root, &d.plugin_id)
+            .ok()?
+            .read_dir()
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("artifact.tar.zst"))
+            .find(|p| p.exists())?;
+        let bytes = std::fs::read(saved).ok()?;
+        crate::core_client::verify_sha256(&bytes, &d.sha256).ok()?;
+        Some(bytes)
     }
 
     fn start(&mut self, d: &Desired, argv: Vec<String>, env: Vec<(String, String)>) {
@@ -262,6 +335,11 @@ impl Reconciler {
             d.plugin_id.clone(),
             Running {
                 version: d.version.clone(),
+                key: d.install_key(),
+                interpreter: d
+                    .interpreter
+                    .as_ref()
+                    .map(|i| format!("{} {}", i.kind, i.version)),
                 config: d.config.clone(),
                 since: chrono::Utc::now(),
                 shutdown: tx,
@@ -397,6 +475,7 @@ mod tests {
             version: version.into(),
             sha256: "unused — already installed".into(),
             config: config.into(),
+            interpreter: None,
         }
     }
 
@@ -482,6 +561,139 @@ mod tests {
             install::is_installed(root.path(), "plugin.t", "0.1.0"),
             "the previous version must survive an upgrade"
         );
+
+        r.stop_all().await;
+    }
+
+    fn interpreter_archive() -> Vec<u8> {
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 0).unwrap();
+        {
+            let mut b = tar::Builder::new(&mut enc);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o755);
+            h.set_cksum();
+            b.append_data(&mut h, "python/bin/python3", &b"#!"[..])
+                .unwrap();
+            b.finish().unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    fn on(d: Desired, python: &str) -> Desired {
+        let bytes = artifact(&d.plugin_id, &d.version);
+        Desired {
+            sha256: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+            interpreter: Some(hc_api_types::plugin_runtimes::InterpreterRef {
+                kind: "python".into(),
+                version: python.into(),
+                sha256: "unused, already unpacked".into(),
+            }),
+            ..d
+        }
+    }
+
+    /// An adapter that fails unless it is handed the unpacked interpreter.
+    fn interpreter_adapter() -> Adapter {
+        Adapter {
+            create_env: vec![
+                "test".into(),
+                "-x".into(),
+                "{interpreter}/python/bin/python3".into(),
+            ],
+            ..adapter()
+        }
+    }
+
+    /// An interpreter update is a new environment beside the old one, made from
+    /// the package already on disk. Nothing is downloaded but the interpreter,
+    /// and that is already here, so the unreachable core is never asked.
+    #[tokio::test]
+    async fn an_interpreter_update_rebuilds_from_the_package_on_disk() {
+        let root = tempfile::tempdir().unwrap();
+        install::install_interpreter(root.path(), "python", "3.13.17", &interpreter_archive())
+            .unwrap();
+        let first = on(desired("plugin.t", "0.1.0", "a = 1"), "3.13.17");
+        let key = first.install_key();
+        assert_eq!(key, "0.1.0+python-3.13.17");
+        install::install_target(
+            root.path(),
+            &interpreter_adapter(),
+            &install::Target {
+                plugin_id: "plugin.t",
+                version: "0.1.0",
+                key: &key,
+                interpreter: Some(
+                    &install::interpreter_dir(root.path(), "python", "3.13.17").unwrap(),
+                ),
+            },
+            &artifact("plugin.t", "0.1.0"),
+            "a = 1",
+        )
+        .await
+        .expect("first install");
+
+        let mut r = reconciler(root.path());
+        r.adapter = interpreter_adapter();
+        assert_eq!(r.converge(vec![first]).await.started, vec!["plugin.t"]);
+
+        for v in ["3.13.18", "3.13.19"] {
+            install::install_interpreter(root.path(), "python", v, &interpreter_archive()).unwrap();
+        }
+        let pass = r
+            .converge(vec![on(desired("plugin.t", "0.1.0", "a = 1"), "3.13.18")])
+            .await;
+        assert_eq!(pass.restarted, vec!["plugin.t"], "{pass:?}");
+        assert_eq!(
+            r.hosted_list()[0].interpreter.as_deref(),
+            Some("python 3.13.18")
+        );
+        // The one before stays for rollback, with its interpreter.
+        assert!(install::is_installed(
+            root.path(),
+            "plugin.t",
+            "0.1.0+python-3.13.17"
+        ));
+        assert!(install::is_interpreter_installed(
+            root.path(),
+            "python",
+            "3.13.17"
+        ));
+        // 3.13.19 was unpacked, but nothing was made from it.
+        assert!(!install::is_interpreter_installed(
+            root.path(),
+            "python",
+            "3.13.19"
+        ));
+
+        // A second update leaves two installs, and the oldest interpreter goes
+        // with the install that used it.
+        install::install_interpreter(root.path(), "python", "3.13.19", &interpreter_archive())
+            .unwrap();
+        let pass = r
+            .converge(vec![on(desired("plugin.t", "0.1.0", "a = 1"), "3.13.19")])
+            .await;
+        assert_eq!(pass.restarted, vec!["plugin.t"], "{pass:?}");
+        assert!(!install::is_installed(
+            root.path(),
+            "plugin.t",
+            "0.1.0+python-3.13.17"
+        ));
+        assert!(install::is_installed(
+            root.path(),
+            "plugin.t",
+            "0.1.0+python-3.13.18"
+        ));
+        assert!(!install::is_interpreter_installed(
+            root.path(),
+            "python",
+            "3.13.17"
+        ));
+        assert!(install::is_interpreter_installed(
+            root.path(),
+            "python",
+            "3.13.18"
+        ));
 
         r.stop_all().await;
     }

@@ -49,8 +49,9 @@ The build:
 4. Starts the interpreter and imports `ssl`, `sqlite3`, `ctypes`, `zlib`,
    `lzma`, `venv` and `asyncio`, so a prune that went too far fails the build.
 
-The upstream sizes are about 36 MB compressed per version; the pruned size is
-measured by the first build and goes into this document then.
+It also removes the shared and static libpython: `bin/python3` is linked
+statically and manylinux wheels never link libpython. The result is about
+13 MB compressed (43 MB unpacked), against 36 MB upstream.
 
 ### The registry index
 
@@ -90,7 +91,8 @@ covers a plugin that needs a particular bug fix.
 ## Matching and placement
 
 A runtime no longer has a Python ABI. It reports its kind, its arch and its
-platform tag: `python`, `x86_64`, `manylinux_2_28`. The platform tag is the one
+platform tag: `python`, `x86_64`, `manylinux_2_28`. The field keeps its name,
+`abi`, and now holds the platform alone. The platform tag is the one
 thing the image still decides, because manylinux_2_28 wheels need glibc 2.28 or
 newer.
 
@@ -117,7 +119,15 @@ the moment things restart anyway.
 
 The 409 in `hello` stays for a kind or platform mismatch, which still means
 every artifact would arrive unusable. It no longer fires when Python changes,
-because Python is no longer the runtime's.
+because Python is no longer the runtime's. It also fires for an image that
+still brings its own Python (its `abi` names a series), with a message telling
+the admin to pull the new image. Its plugins keep running meanwhile.
+
+A runtime record stored with `cp312-manylinux_2_28` is rewritten to the
+platform alone on its first hello from the new image. A placement made before
+this change has no interpreter; core picks one the first time its runtime asks
+for placements (the newest interpreter of a series the plugin version
+publishes for) and stores it. That is the whole move: replace the container.
 
 ## Serving interpreters
 
@@ -147,9 +157,14 @@ Core keeps no copy, as with packages. The runtime host keeps it.
   plugin installs.
 - `adapter.toml` gains `{interpreter}`. The host still knows nothing about
   Python; it unpacks a tar and fills in a path.
+- After a new install starts, the host keeps it and the newest other install
+  of that plugin, for rollback, and removes older ones. Only folders marked
+  `.installed` count: a plugin keeps its own files beside them (the
+  Assistant's `data/`).
 - An interpreter is deleted once no install directory on the runtime uses it.
-- Rebuilding a venv for a new interpreter uses the wheelhouse already in
-  `pkg/`, so an interpreter update downloads the interpreter and nothing else.
+- Each install keeps its package as `artifact.tar.zst`, so a new venv for a
+  new interpreter is made from it, and an interpreter update downloads the
+  interpreter and nothing else.
 
 ### uv instead of venv and pip
 
@@ -157,8 +172,8 @@ Pruning `ensurepip` means `python -m venv` makes environments without pip. The
 image ships uv (a static binary, pinned) and the adapter becomes:
 
 ```toml
-kind     = "python"
-platform = "manylinux_2_28"
+kind = "python"
+abi  = "manylinux_2_28"
 
 create_env = ["uv", "venv", "--python", "{interpreter}/python/bin/python3", "{env}"]
 install    = ["uv", "pip", "install", "--offline", "--no-index",
@@ -173,8 +188,8 @@ same pydantic-core wheel store it once.
 ### The image
 
 `debian:bookworm-slim` (glibc 2.36), tini, hc-runtime-host, uv and
-`adapter.toml`. No Python. `HC_RUNTIME_ABI` becomes `HC_RUNTIME_PLATFORM`.
-`MIN_HOST_VERSION` goes up to the first host that understands interpreters.
+`adapter.toml`. No Python. `HC_RUNTIME_ABI` is `manylinux_2_28`.
+`MIN_HOST_VERSION` is 0.2.3, the first host that understands interpreters.
 
 ## Updates
 
@@ -182,8 +197,8 @@ Interpreter updates sit beside plugin updates and wait for an admin.
 
 - Core computes them: for each placement, the newest interpreter of its series
   in the index, when that is newer than the one recorded.
-- `GET /plugin-runtimes` adds, per runtime, the interpreters in use, the newest
-  available and which plugins each would restart.
+- `GET /plugin-runtimes/interpreters` lists, per runtime and series, the
+  versions in use, the newest available and which plugins it would restart.
 - `POST /plugin-runtimes/{id}/interpreters/update` with `{kind, series}` moves
   every placement on that runtime from one series to its newest patch. The host
   converges as it does for any placement change.

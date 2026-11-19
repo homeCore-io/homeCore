@@ -21,7 +21,7 @@ fn hello_body(kind: &str) -> HelloRequest {
     HelloRequest {
         capabilities: RuntimeCapabilities {
             kind: kind.into(),
-            abi: "cp312-manylinux_2_28".into(),
+            abi: "manylinux_2_28".into(),
             arch: "x86_64".into(),
         },
         host_version: "0.2.0".into(),
@@ -108,6 +108,26 @@ async fn a_runtime_is_added_connects_and_is_reset_and_removed() {
     assert_eq!(
         hello(&base, &key, &key.secret, "node").await,
         StatusCode::CONFLICT
+    );
+    // An image that still brings its own Python is told to update, since it
+    // would ignore the interpreter each plugin is placed with.
+    let mut old_image = hello_body("python");
+    old_image.capabilities.abi = "cp312-manylinux_2_28".into();
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{base}/api/v1/plugin-runtimes/{}/hello",
+            key.runtime_id
+        ))
+        .bearer_auth(&key.secret)
+        .json(&old_image)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let said = resp.text().await.unwrap();
+    assert!(
+        said.contains("Pull the latest hc-runtime-python image"),
+        "{said}"
     );
     // Saying hello is what records where it runs.
     let list: serde_json::Value = http

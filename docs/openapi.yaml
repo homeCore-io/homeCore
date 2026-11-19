@@ -6125,8 +6125,10 @@ paths:
         Authenticated by the runtime's own secret as a bearer token, not by a
         JWT. Records what it runs on and when it was last seen. Its page also
         calls this to test a key before saving it. A runtime whose image hosts a
-        different language or ABI from what it was added for is refused with
-        `409`.
+        different language or platform from what it was added for is refused
+        with `409`, and so is an image that brings its own Python
+        (`capabilities.abi` naming a series, such as `cp312-manylinux_2_28`):
+        plugins now run on the interpreter they are placed with.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -6162,7 +6164,10 @@ paths:
         "401":
           description: The key was reset, or the runtime was removed
         "409":
-          description: The image hosts a different language or ABI
+          description: |
+            The image hosts a different language or platform, or is older than
+            this homeCore and brings its own Python. The error says which, and
+            what to do.
 
   /plugin-runtimes/{id}/placements:
     get:
@@ -6209,8 +6214,140 @@ paths:
                             broker login. Core owns it, exactly as for a binary
                             plugin.
                         placed_at: { type: string, format: date-time }
+                        interpreter:
+                          type: object
+                          nullable: true
+                          description: |
+                            The interpreter to make the plugin's environment
+                            from, chosen from the signed index. Fetch it from
+                            `/plugin-runtimes/{id}/interpreters/{kind}/{version}`.
+                            A placement made before interpreters came from the
+                            registry is given one the first time its runtime
+                            asks.
+                          properties:
+                            kind: { type: string, example: python }
+                            version: { type: string, example: 3.13.18 }
+                            sha256: { type: string }
         "404":
           description: Unknown runtime, or the key does not match
+
+  /plugin-runtimes/{id}/interpreters/{kind}/{version}:
+    get:
+      operationId: getPluginRuntimeInterpreter
+      summary: Fetch the verified interpreter a placement runs on
+      description: |
+        The same boundary as artifacts: core re-reads the signed index,
+        downloads the interpreter and checks its sha256, and the runtime
+        re-checks only `x-hc-sha256`. Only an interpreter one of this runtime's
+        own placements names is served. Authenticated by the runtime's secret.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: kind, in: path, required: true, schema: { type: string, example: python } }
+        - { name: version, in: path, required: true, schema: { type: string, example: 3.13.18 } }
+      responses:
+        "200":
+          description: The verified `.tar.zst`, with one top directory, `python/`
+          headers:
+            x-hc-sha256:
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404":
+          description: Unknown runtime, wrong key, or no placement here uses it
+        "409":
+          description: |
+            The runtime has not reported its architecture yet, or the registry
+            no longer lists that interpreter for it.
+        "502":
+          description: Registry unreachable, or the interpreter failed verification
+        "503":
+          description: No plugin registry is configured
+
+  /plugin-runtimes/interpreters:
+    get:
+      operationId: listPluginRuntimeInterpreters
+      summary: The interpreters hosted plugins run on, and updates waiting
+      description: |
+        One entry per runtime and interpreter series in use. `update` is the
+        newest patch the index lists when it is newer than one in use; applying
+        it restarts every plugin in `plugins`, so it waits for an admin.
+        `eol` is true once the series gets no more fixes upstream.
+      tags: [plugins]
+      responses:
+        "200":
+          description: Interpreters in use
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  interpreters:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        runtime_id: { type: string }
+                        kind: { type: string, example: python }
+                        series: { type: string, example: cp313 }
+                        versions:
+                          type: array
+                          items: { type: string }
+                        update: { type: string, nullable: true, example: 3.13.19 }
+                        eol: { type: boolean }
+                        plugins:
+                          type: array
+                          items: { type: string }
+        "502":
+          description: Registry unreachable
+        "503":
+          description: No plugin registry is configured
+
+  /plugin-runtimes/{id}/interpreters/update:
+    post:
+      operationId: updatePluginRuntimeInterpreter
+      summary: Move one series on one runtime to its newest patch
+      description: |
+        Every placement on the runtime that runs on `series` keeps its plugin
+        version and config and gets the newest interpreter of that series. The
+        runtime makes new environments beside the old ones from the packages it
+        already has, then restarts each plugin. Needs `plugins:write`.
+      tags: [plugins]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, series]
+              properties:
+                kind: { type: string, example: python }
+                series: { type: string, example: cp313 }
+      responses:
+        "200":
+          description: The interpreter now placed, and the plugins moved to it
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtime_id: { type: string }
+                  kind: { type: string }
+                  version: { type: string }
+                  plugins:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        plugin_id: { type: string }
+                        from: { type: string }
+        "404":
+          description: Unknown runtime, or the index lists no such series for it
 
   /plugin-runtimes/{id}/artifacts/{plugin_id}:
     get:
@@ -6259,8 +6396,8 @@ paths:
         "409":
           description: |
             The runtime has not reported its architecture yet, or the registry
-            no longer publishes an artifact matching its kind, ABI and
-            architecture.
+            no longer publishes a build matching its kind, platform and
+            architecture, for the series of the interpreter it was placed with.
         "502":
           description: Registry unreachable, or the artifact failed verification
         "503":
@@ -8972,11 +9109,15 @@ components:
     RuntimeCapabilities:
       type: object
       description: |
-        What a runtime can host. The triple is the whole matching key used when
-        placing a plugin artifact.
+        What a runtime can host. A plugin build fits when its kind and arch
+        match and the platform part of its ABI tag equals `abi`; the
+        interpreter comes from the registry, by the series in the build's tag.
       properties:
         kind: { type: string, example: python }
-        abi: { type: string, example: cp312-manylinux_2_28 }
+        abi:
+          type: string
+          example: manylinux_2_28
+          description: The platform the image provides, without a Python series.
         arch: { type: string, example: x86_64 }
 
     RuntimeConnectionKey:
@@ -8993,7 +9134,7 @@ components:
         username: { type: string, example: plugin.python-rt4f2a9c17 }
         secret: { type: string }
         kind: { type: string, example: python }
-        abi: { type: string, example: cp312-manylinux_2_28 }
+        abi: { type: string, example: manylinux_2_28 }
 
     IssuedRuntimeKey:
       type: object

@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "hc-runtime-host"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
