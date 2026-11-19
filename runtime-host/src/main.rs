@@ -98,9 +98,29 @@ fn hostname() -> String {
 fn capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
         kind: env_or("HC_RUNTIME_KIND", "python"),
-        abi: env_or("HC_RUNTIME_ABI", "manylinux_2_28"),
+        abi: platform_abi(&env_or("HC_RUNTIME_ABI", "manylinux_2_28")),
         arch: env_or("HC_RUNTIME_ARCH", std::env::consts::ARCH),
     }
+}
+
+/// The platform part of `HC_RUNTIME_ABI`.
+///
+/// Images before host 0.2.3 set `cp312-manylinux_2_28`, and a container
+/// updated in place (Portainer, Unraid, Watchtower) keeps the old image's
+/// environment, which then overrides the new image's. The Python part means
+/// nothing now that each plugin brings its own, so it is dropped with a
+/// warning instead of refusing to start.
+fn platform_abi(raw: &str) -> String {
+    let platform = hc_api_types::plugin_runtimes::platform_of(raw);
+    if platform != raw {
+        tracing::warn!(
+            set = raw,
+            using = platform,
+            "HC_RUNTIME_ABI still names a Python, left over from an older image; \
+             using the platform alone. Remove HC_RUNTIME_ABI from the container's settings"
+        );
+    }
+    platform.to_string()
 }
 
 #[tokio::main]
@@ -456,5 +476,16 @@ async fn terminate() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_abi_left_over_from_an_older_image_becomes_its_platform() {
+        assert_eq!(platform_abi("cp312-manylinux_2_28"), "manylinux_2_28");
+        assert_eq!(platform_abi("manylinux_2_28"), "manylinux_2_28");
     }
 }
