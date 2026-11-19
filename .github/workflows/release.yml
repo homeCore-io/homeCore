@@ -86,7 +86,12 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
             if [[ "$TAG" =~ ^v[0-9] ]]; then
               :                                  # core, defaults above
-            elif [[ "$TAG" =~ ^(hc-[a-z0-9-]+)-v[0-9] ]]; then
+            elif [[ "$TAG" =~ ^hc-cli-v[0-9] ]]; then
+              # The command-line tool, a crate rather than a plugin.
+              COMPONENT=tool
+              NAME=hc-cli
+              PREFIX="hc-cli-"
+          elif [[ "$TAG" =~ ^(hc-[a-z0-9-]+)-v[0-9] ]]; then
               COMPONENT=plugin
               NAME="${BASH_REMATCH[1]}"
               PREFIX="${NAME}-"
@@ -97,7 +102,7 @@ jobs:
                 exit 1
               fi
             else
-              echo "::error::tag '$TAG' matches no component. Use v<version> for the server or hc-<name>-v<version> for a plugin."
+              echo "::error::tag '$TAG' matches no component. Use v<version> for the server, hc-cli-v<version> for the command-line tool or hc-<name>-v<version> for a plugin."
               exit 1
             fi
           fi
@@ -116,6 +121,10 @@ jobs:
       # The repo root is a pure [workspace]; the binary's [package] lives here.
       version_manifest: homecore/Cargo.toml
       config_example: config/homecore.toml.example
+      # hc-cli rides along: in the archive's bin/ and in the image, so
+      # `docker exec hc-core hc-cli ...` works. Its own releases (below) are
+      # for machines that run no core.
+      extra_binaries: hc-cli
       extra_files: |
         config/profiles
         scripts/service-templates/homecore.service
@@ -155,6 +164,23 @@ jobs:
       # a tag release, package the binary, attach it to the GitHub Release, and
       # notify the plugin registry to index it.
       publish_registry: true
+
+  # ── The command-line tool ─────────────────────────────────────────────────
+  #
+  # hc-cli on its own, tagged hc-cli-v<version>: a static binary for any
+  # Linux x86_64 machine that scripts the house over the network. No image,
+  # no registry entry.
+  tool:
+    needs: resolve
+    if: needs.resolve.outputs.component == 'tool'
+    uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    secrets: inherit
+    with:
+      binary_name: hc-cli
+      tag_prefix: hc-cli-
+      source_dir: crates/hc-cli
+      version_manifest: crates/hc-cli/Cargo.toml
+      archive_kind: tool
 
   # ── The Python plugin runtime image ───────────────────────────────────────
   #

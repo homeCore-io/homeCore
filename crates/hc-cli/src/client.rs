@@ -5,7 +5,7 @@
 //! server side), so same-host admin tooling needs no token. The TCP path
 //! is used for remote or token-auth operations.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode};
@@ -13,6 +13,41 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri as UnixUri};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
+
+/// A request core answered with an error status. Kept as a type so the
+/// binary can turn it into an exit code a script can branch on.
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: u16,
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Core's errors are `{"error": "..."}`; show the message alone.
+        let msg = serde_json::from_str::<serde_json::Value>(&self.body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .unwrap_or_else(|| self.body.clone());
+        write!(f, "{} {} → {}: {msg}", self.method, self.path, self.status)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Core could not be reached at all: refused, timed out, no socket.
+#[derive(Debug)]
+pub struct Unreachable(pub String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot reach homeCore: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
 
 /// Transport selection — how the client talks to the server.
 #[derive(Debug, Clone)]
@@ -80,6 +115,11 @@ impl Client {
         Ok(())
     }
 
+    /// `PUT {base}/api/v1/{path}` with a JSON body.
+    pub async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        self.request(Method::PUT, path, Some(body)).await
+    }
+
     /// `PATCH {base}/api/v1/{path}` with a JSON body.
     pub async fn patch<B: Serialize, T: DeserializeOwned>(
         &self,
@@ -106,10 +146,13 @@ impl Client {
                 if let Some(b) = body {
                     req = req.json(b);
                 }
-                let resp = req
-                    .send()
-                    .await
-                    .with_context(|| format!("{method} {url}"))?;
+                let resp = req.send().await.map_err(|e| {
+                    if e.is_connect() || e.is_timeout() {
+                        anyhow::Error::new(Unreachable(format!("{base_url}: {e}")))
+                    } else {
+                        anyhow::Error::new(e).context(format!("{method} {url}"))
+                    }
+                })?;
                 let status = resp.status();
                 let bytes = resp.bytes().await.context("reading response body")?;
                 (
@@ -128,11 +171,9 @@ impl Client {
                     Full::new(Bytes::new())
                 };
                 let req = builder.body(payload).context("building UDS request")?;
-                let resp = self
-                    .uds_client
-                    .request(req)
-                    .await
-                    .with_context(|| format!("{method} {}", full_path))?;
+                let resp = self.uds_client.request(req).await.map_err(|e| {
+                    anyhow::Error::new(Unreachable(format!("{}: {e}", socket.display())))
+                })?;
                 let status = resp.status();
                 let body = resp
                     .into_body()
@@ -145,8 +186,13 @@ impl Client {
         };
 
         if !status.is_success() {
-            let msg = std::str::from_utf8(&bytes).unwrap_or("<binary>");
-            bail!("{method} {full_path} → {status}: {msg}");
+            return Err(ApiError {
+                status: status.as_u16(),
+                method: method.to_string(),
+                path: full_path,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            }
+            .into());
         }
 
         if bytes.is_empty() {

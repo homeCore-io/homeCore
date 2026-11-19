@@ -56,7 +56,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 COPY homecore/ ./homecore/
 
-RUN cargo build --release --bin homecore
+RUN cargo build --release --bin homecore --bin hc-cli
 
 # -----------------------------------------------------------------------------
 # Stage 2 — Runtime
@@ -80,7 +80,8 @@ RUN adduser -D -h /opt/homecore homecore
 
 # Binary
 COPY --from=builder /build/target/release/homecore /usr/local/bin/homecore
-RUN chmod 755 /usr/local/bin/homecore
+COPY --from=builder /build/target/release/hc-cli   /usr/local/bin/hc-cli
+RUN chmod 755 /usr/local/bin/homecore /usr/local/bin/hc-cli
 
 # Directory layout (data + logs are volumes; config and rules may be volumes or bind-mounts)
 RUN mkdir -p \
