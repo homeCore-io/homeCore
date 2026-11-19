@@ -357,7 +357,7 @@ homeCore/                          # container dir (no git)
 │   │   ├── hc-influx/             # optional InfluxDB v2 export of device state
 │   │   ├── hc-time/               # configured-timezone helpers (never chrono::Local)
 │   │   ├── hc-web-admin/          # optional static-file mount for a pre-built UI
-│   │   └── hc-cli/                # admin CLI (issuance, broker config gen, …)
+│   │   └── hc-cli/                # command-line tool: devices, rules, logs, events, admin
 │   ├── homecore/                  # the server binary — a workspace member like
 │   │   ├── src/                   #   any other; the root is a pure [workspace]
 │   │   │   ├── main.rs

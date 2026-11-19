@@ -63,10 +63,13 @@ RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tini su-exec
 
 COPY homecore-${TARGETARCH}  /usr/local/bin/homecore
+# The command-line tool, for `docker exec hc-core hc-cli ...`. The release
+# builds it beside homecore (extra_binaries in release.yml).
+COPY hc-cli-${TARGETARCH}    /usr/local/bin/hc-cli
 COPY config.toml.example     /opt/homecore/defaults/config.toml
 COPY entrypoint-core.sh      /entrypoint.sh
 
-RUN chmod +x /usr/local/bin/homecore /entrypoint.sh
+RUN chmod +x /usr/local/bin/homecore /usr/local/bin/hc-cli /entrypoint.sh
 
 # Embedded broker on 1883, REST + WebSocket API on 8080. Nothing serves a UI
 # from this image. hc-web-svelte does that and proxies /api/v1 to 8080.

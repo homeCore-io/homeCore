@@ -1587,19 +1587,21 @@ dependencies = [
 
 [[package]]
 name = "hc-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytes",
  "chrono",
  "clap",
  "dirs",
+ "futures-util",
  "hc-api-types",
  "hc-auth",
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
  "hyperlocal",
+ "libc",
  "percent-encoding",
  "rand 0.10.1",
  "reqwest",
@@ -1608,6 +1610,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -2182,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.117"
+version = "0.1.118"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -5134,7 +5137,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.40",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tungstenite 0.29.0",
 ]
 
@@ -5428,6 +5435,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls 0.23.40",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
 ]

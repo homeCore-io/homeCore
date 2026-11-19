@@ -1,4 +1,4 @@
-//! `hc-cli` — command-line administration tool for homeCore.
+//! `hc-cli`: script and administer homeCore from the command line.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -10,19 +10,47 @@ use hc_cli::config::{Config, StoredCredentials};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "homeCore administration CLI")]
+#[command(
+    version,
+    about = "Script and administer homeCore from the command line",
+    after_help = "Connecting: --url and --token (or HOMECORE_URL and HOMECORE_TOKEN) reach \
+core from anywhere with an API key. With neither, hc-cli uses the admin socket on the \
+core host, then http://127.0.0.1:8080 with the token `hc-cli auth login` stored.\n\n\
+Exit codes: 0 done, 1 failed, 2 bad usage, 3 core unreachable, 4 not allowed \
+(401/403), 5 not found."
+)]
 struct Cli {
-    /// Base URL for TCP connection (e.g. `http://192.168.1.10:8080`).
-    /// If omitted, defaults to the UDS admin socket with TCP fallback.
-    #[arg(long, global = true)]
+    /// Core's address, such as `http://192.168.1.10:8080`.
+    #[arg(
+        long = "url",
+        value_name = "URL",
+        visible_alias = "host",
+        global = true,
+        env = "HOMECORE_URL"
+    )]
     host: Option<String>,
+
+    /// An API key (`hc_sk_...`) or a token from `hc-cli auth login`.
+    #[arg(long, global = true, env = "HOMECORE_TOKEN", hide_env_values = true)]
+    token: Option<String>,
 
     /// Path to a config file; defaults to `~/.config/hc-cli/config.toml`.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Output format: `human` or `json`.
-    #[arg(long, global = true, default_value = "human")]
+    /// Output format: `human` or `json`. Defaults to the config file's
+    /// `output`, then `human`.
+    #[arg(
+        long = "output",
+        short = 'o',
+        value_name = "FORMAT",
+        global = true,
+        env = "HOMECORE_OUTPUT"
+    )]
+    output_arg: Option<String>,
+
+    /// The resolved output format.
+    #[arg(skip)]
     output: String,
 
     #[command(subcommand)]
@@ -97,6 +125,29 @@ enum Command {
     /// config from a homeCore `homecore.toml`.
     #[command(subcommand)]
     Broker(BrokerCommand),
+
+    /// List, show and control devices.
+    #[command(subcommand)]
+    Device(house::DeviceCommand),
+
+    /// List and activate scenes.
+    #[command(subcommand)]
+    Scene(house::SceneCommand),
+
+    /// List, enable, disable and run rules.
+    #[command(subcommand, visible_alias = "automation")]
+    Rule(house::RuleCommand),
+
+    /// List modes and switch them on or off.
+    #[command(subcommand)]
+    Mode(house::ModeCommand),
+
+    /// Read core's and plugins' recent logs, or follow them.
+    Logs(logs::LogsArgs),
+
+    /// Watch the house's events as they happen.
+    #[command(subcommand)]
+    Events(events::EventsCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -272,8 +323,51 @@ enum UserCommand {
     },
 }
 
+mod events;
+mod house;
+mod logs;
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    // Die quietly when the reader goes away (`hc-cli logs | head`), as other
+    // command-line tools do, rather than panicking on a broken pipe.
+    // SAFETY: called before any other thread or signal handler exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::ExitCode::from(exit_code(&e))
+        }
+    }
+}
+
+/// The exit code a script can branch on. 2 is clap's own, for bad usage.
+fn exit_code(e: &anyhow::Error) -> u8 {
+    for cause in e.chain() {
+        if cause
+            .downcast_ref::<hc_cli::client::Unreachable>()
+            .is_some()
+        {
+            return 3;
+        }
+        if let Some(api) = cause.downcast_ref::<hc_cli::client::ApiError>() {
+            return match api.status {
+                401 | 403 => 4,
+                404 => 5,
+                _ => 1,
+            };
+        }
+        if cause.downcast_ref::<house::NotFound>().is_some() {
+            return 5;
+        }
+    }
+    1
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -283,13 +377,17 @@ async fn main() -> Result<()> {
         .without_time()
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let config_path = cli
         .config
         .clone()
         .or_else(Config::default_path)
         .context("cannot determine config path")?;
     let cfg = Config::load(&config_path)?;
+    cli.output = cli.output_arg.clone().unwrap_or_else(|| cfg.output.clone());
+    if !matches!(cli.output.as_str(), "human" | "json") {
+        bail!("--output takes `human` or `json`, not `{}`", cli.output);
+    }
 
     match &cli.cmd {
         Command::Setup(args) => cmd_setup(&cli, &cfg, &config_path, args).await,
@@ -349,6 +447,24 @@ async fn main() -> Result<()> {
             UserCommand::Delete { id } => cmd_user_delete(&cli, &cfg, *id).await,
             UserCommand::SetRole { id, role } => cmd_user_set_role(&cli, &cfg, *id, role).await,
         },
+        Command::Device(cmd) => {
+            house::device(&make_client(&cli, &cfg).await?, &cli.output, cmd).await
+        }
+        Command::Scene(cmd) => {
+            house::scene(&make_client(&cli, &cfg).await?, &cli.output, cmd).await
+        }
+        Command::Rule(cmd) => house::rule(&make_client(&cli, &cfg).await?, &cli.output, cmd).await,
+        Command::Mode(cmd) => house::mode(&make_client(&cli, &cfg).await?, &cli.output, cmd).await,
+        Command::Logs(args) => logs::run(&make_client(&cli, &cfg).await?, &cli.output, args).await,
+        Command::Events(cmd) => {
+            events::run(
+                make_client(&cli, &cfg),
+                &stream_target(&cli, &cfg),
+                &cli.output,
+                cmd,
+            )
+            .await
+        }
         Command::Broker(BrokerCommand::GenerateMosquittoConfig {
             config,
             out_dir,
@@ -388,27 +504,44 @@ async fn main() -> Result<()> {
 
 // ── Client construction ────────────────────────────────────────────────────
 
+/// Who to talk to, and as whom. A token given on the command line or in
+/// `HOMECORE_TOKEN` always wins; it goes to `--url`, or to the config's TCP
+/// address, never to the admin socket, so a script acts as its key and not
+/// as the socket's implicit admin. With no token, `--url` uses the stored
+/// login when it was made for that address, and with no URL either, the
+/// admin socket comes first.
 async fn make_client(cli: &Cli, cfg: &Config) -> Result<Client> {
-    if let Some(host) = &cli.host {
-        let token = cfg.credentials.as_ref().and_then(|c| {
-            if c.host == *host {
-                Some(c.token.clone())
-            } else {
-                None
-            }
-        });
-        let c = Client::new(Transport::Tcp {
-            base_url: host.clone(),
-            token,
-        });
-        c.probe()
-            .await
-            .with_context(|| format!("host {host} unreachable"))?;
-        return Ok(c);
+    if cli.host.is_some() || cli.token.is_some() {
+        let (base_url, token) = tcp_target(cli, cfg);
+        return Ok(Client::new(Transport::Tcp { base_url, token }));
     }
 
     let token = cfg.credentials.as_ref().map(|c| c.token.clone());
     pick_local(&cfg.uds_path, &cfg.tcp_url, token).await
+}
+
+/// The TCP address and token, resolved the same way `make_client` does.
+fn tcp_target(cli: &Cli, cfg: &Config) -> (String, Option<String>) {
+    let base_url = cli
+        .host
+        .clone()
+        .unwrap_or_else(|| cfg.tcp_url.clone())
+        .trim_end_matches('/')
+        .to_string();
+    let token = cli.token.clone().or_else(|| {
+        cfg.credentials
+            .as_ref()
+            .filter(|c| c.host.trim_end_matches('/') == base_url)
+            .map(|c| c.token.clone())
+    });
+    (base_url, token)
+}
+
+/// Where a WebSocket stream connects. Streams go over TCP only: the admin
+/// socket serves plain requests.
+fn stream_target(cli: &Cli, cfg: &Config) -> events::Target {
+    let (base_url, token) = tcp_target(cli, cfg);
+    events::Target { base_url, token }
 }
 
 // ── setup ──────────────────────────────────────────────────────────────────
