@@ -98,7 +98,7 @@ fn hostname() -> String {
 fn capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
         kind: env_or("HC_RUNTIME_KIND", "python"),
-        abi: env_or("HC_RUNTIME_ABI", "cp312-manylinux_2_28"),
+        abi: env_or("HC_RUNTIME_ABI", "manylinux_2_28"),
         arch: env_or("HC_RUNTIME_ARCH", std::env::consts::ARCH),
     }
 }

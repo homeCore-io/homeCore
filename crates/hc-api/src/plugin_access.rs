@@ -789,6 +789,7 @@ mod tests {
             sha256: String::new(),
             config: String::new(),
             placed_at: Utc::now(),
+            interpreter: None,
         })
         .unwrap();
         let g = grant_api_access(&store, "plugin.mcp", &["devices:read".into()], LOCAL, true)

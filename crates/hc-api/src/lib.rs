@@ -1236,6 +1236,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugin-runtimes/{id}/artifacts/{plugin_id}",
             get(plugin_runtime_handlers::get_placement_artifact),
         )
+        .route(
+            "/plugin-runtimes/{id}/interpreters/{kind}/{version}",
+            get(plugin_runtime_handlers::get_placement_interpreter),
+        )
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/{path}", post(handlers::receive_webhook));
@@ -1496,6 +1500,14 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugin-runtimes/placements",
             get(plugin_runtime_handlers::list_all_placements),
+        )
+        .route(
+            "/plugin-runtimes/interpreters",
+            get(plugin_runtime_handlers::list_interpreters),
+        )
+        .route(
+            "/plugin-runtimes/{id}/interpreters/update",
+            post(plugin_runtime_handlers::update_interpreter),
         )
         .route(
             "/plugin-runtimes/{id}",

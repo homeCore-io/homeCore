@@ -7,13 +7,17 @@
 //!
 //! ```toml
 //! kind = "python"
-//! abi  = "cp312-manylinux_2_28"
+//! abi  = "manylinux_2_28"
 //!
-//! create_env = ["python3", "-m", "venv", "{env}"]
-//! install    = ["{env}/bin/pip", "install", "--no-index",
-//!               "--find-links", "{wheelhouse}", "{plugin_wheel}"]
+//! create_env = ["uv", "venv", "--python", "{interpreter}/python/bin/python3", "{env}"]
+//! install    = ["uv", "pip", "install", "--offline", "--no-index",
+//!               "--find-links", "{wheelhouse}", "--python", "{env}/bin/python",
+//!               "{plugin_wheel}"]
 //! launch     = ["{env}/bin/python", "-m", "{entrypoint}", "{config}"]
 //! ```
+//!
+//! `{interpreter}` is the interpreter core placed the plugin with, unpacked
+//! under the data directory. The image brings no Python of its own.
 //!
 //! Placeholders are substituted verbatim into argv. They never go near a shell,
 //! so a path with a space is a path with a space rather than two arguments.
@@ -27,7 +31,7 @@ use std::path::Path;
 pub struct Adapter {
     /// Runtime kind, e.g. `python`. Advertised at enrollment.
     pub kind: String,
-    /// ABI tag artifacts must match, e.g. `cp312-manylinux_2_28`.
+    /// The platform artifacts must be built for, e.g. `manylinux_2_28`.
     pub abi: String,
     /// Create an isolated environment for one plugin.
     pub create_env: Vec<String>,

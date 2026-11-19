@@ -96,6 +96,24 @@ pub struct PlacementRecord {
     /// binary plugin. Includes the minted MQTT credential.
     pub config: String,
     pub placed_at: DateTime<Utc>,
+    /// The interpreter it runs on, chosen from the signed index when it was
+    /// placed and changed only by an update the admin applies. None for a
+    /// placement made before runtimes got their interpreters from the registry.
+    #[serde(default)]
+    pub interpreter: Option<PlacedInterpreter>,
+}
+
+/// An interpreter from the registry index, as a placement pins it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedInterpreter {
+    /// e.g. `python`.
+    pub kind: String,
+    /// e.g. `3.13.18`.
+    pub version: String,
+    /// The series it belongs to, e.g. `cp313`.
+    pub abi: String,
+    /// Hex sha256 of the archive, as the index lists it.
+    pub sha256: String,
 }
 
 pub struct PluginRuntimeStore {
@@ -335,6 +353,7 @@ mod tests {
             sha256: "abc".into(),
             config: "[homecore]\n".into(),
             placed_at: Utc::now(),
+            interpreter: None,
         }
     }
 

@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "hc-runtime-host"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.118"
+version = "0.1.119"
 dependencies = [
  "anyhow",
  "base64 0.23.0",

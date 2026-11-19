@@ -15,10 +15,10 @@ use axum::{
 };
 use chrono::Utc;
 use hc_api_types::plugin_runtimes::{
-    abi_for, AddRuntimeRequest, ConnectionKey, HelloRequest, HelloResponse, IssuedKey,
-    RuntimeSummary, UpdateRuntimeRequest,
+    abi_for, platform_of, series_of, AddRuntimeRequest, ConnectionKey, HelloRequest, HelloResponse,
+    IssuedKey, RuntimeSummary, UpdateRuntimeRequest,
 };
-use hc_state::plugin_runtime_store::RuntimeRecord;
+use hc_state::plugin_runtime_store::{PlacedInterpreter, RuntimeRecord};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 
@@ -449,15 +449,37 @@ pub async fn hello(
             "homeCore doesn't know this key: it was reset, or the runtime was removed",
         );
     };
-    if req.capabilities.kind != rec.kind || req.capabilities.abi != rec.abi {
+    // An image that names a Python series brings its own interpreter, which
+    // is how runtimes worked before interpreters came from the registry. It
+    // would ignore the interpreter each plugin is placed with.
+    if series_of(&req.capabilities.abi).is_some() {
+        return err(
+            StatusCode::CONFLICT,
+            format!(
+                "this runtime's image is older than homeCore {}: it brings its own Python ({}). \
+                 Pull the latest hc-runtime-{} image and restart the container",
+                state.homecore_version, req.capabilities.abi, req.capabilities.kind
+            ),
+        );
+    }
+    if req.capabilities.kind != rec.kind
+        || platform_of(&req.capabilities.abi) != platform_of(&rec.abi)
+    {
         return err(
             StatusCode::CONFLICT,
             format!(
                 "this runtime was added for {} {}, and this image hosts {} {}",
-                rec.kind, rec.abi, req.capabilities.kind, req.capabilities.abi
+                rec.kind,
+                platform_of(&rec.abi),
+                req.capabilities.kind,
+                req.capabilities.abi
             ),
         );
     }
+    // A runtime added before interpreters came from the registry is stored
+    // with the series it was pinned to (`cp312-manylinux_2_28`). Its image now
+    // reports the platform alone, and so does its record from here on.
+    rec.abi = req.capabilities.abi.clone();
     rec.arch = Some(req.capabilities.arch);
     rec.host_version = Some(req.host_version);
     rec.hostname = Some(req.hostname);
@@ -503,6 +525,7 @@ pub fn place_on_runtime(
     version: &str,
     artifact_url: &str,
     sha256: &str,
+    interpreter: Option<PlacedInterpreter>,
 ) -> anyhow::Result<()> {
     let ctx = state
         .plugin_install
@@ -530,6 +553,7 @@ pub fn place_on_runtime(
         sha256: sha256.to_string(),
         config: config_store.read(plugin_id)?,
         placed_at: Utc::now(),
+        interpreter,
     })?;
     nudge_runtime(state, runtime_id);
     Ok(())
@@ -594,6 +618,7 @@ pub async fn list_all_placements(
                 "plugin_id": p.plugin_id,
                 "version": p.version,
                 "placed_at": p.placed_at,
+                "interpreter": p.interpreter.as_ref().map(|i| format!("{} {}", i.kind, i.version)),
             })
         })
         .collect();
@@ -626,10 +651,11 @@ pub async fn list_placements(
     };
 
     let store = store(&state);
-    let placements = match store.placements_for(&rec.runtime_id) {
+    let mut placements = match store.placements_for(&rec.runtime_id) {
         Ok(p) => p,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
     };
+    fill_missing_interpreters(&state, &rec, &mut placements).await;
 
     // Seeing its own placements is the runtime saying hello, so it counts as
     // being seen — the alternative is a healthy runtime looking stale on the
@@ -660,10 +686,76 @@ pub async fn list_placements(
                 "sha256": p.sha256,
                 "config": config,
                 "placed_at": p.placed_at,
+                // What the runtime makes the plugin's environment from. The
+                // runtime fetches it from core, as it does the artifact.
+                "interpreter": p.interpreter.as_ref().map(|i| json!({
+                    "kind": i.kind,
+                    "version": i.version,
+                    "sha256": i.sha256,
+                })),
             })
         })
         .collect();
     (StatusCode::OK, Json(json!({ "placements": body }))).into_response()
+}
+
+/// Give placements made before interpreters came from the registry the
+/// interpreter their build needs, and store it.
+///
+/// Those placements were made for a runtime whose image carried its own
+/// Python, and record none. The same plugin version, matched to the newest
+/// interpreter of a series it publishes for, is what that runtime now runs.
+/// The index is read only when a placement is missing one, so a runtime's
+/// regular poll costs nothing extra once this has happened. A placement that
+/// can't be matched is left as it is, and the runtime reports why it can't
+/// install it.
+async fn fill_missing_interpreters(
+    state: &AppState,
+    rec: &RuntimeRecord,
+    placements: &mut [hc_state::plugin_runtime_store::PlacementRecord],
+) {
+    if placements.iter().all(|p| p.interpreter.is_some()) {
+        return;
+    }
+    let (Some(reg), Some(arch)) = (state.registry.clone(), rec.arch.as_deref()) else {
+        return;
+    };
+    let index = match reg.index().await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(runtime_id = %rec.runtime_id, error = %format!("{e:#}"),
+                "could not read the registry to choose interpreters for older placements");
+            return;
+        }
+    };
+    let platform = platform_of(&rec.abi);
+    for p in placements.iter_mut().filter(|p| p.interpreter.is_none()) {
+        let Some(pv) = index
+            .plugin(&p.plugin_id)
+            .and_then(|plugin| plugin.version(&p.version))
+        else {
+            continue;
+        };
+        let Some((art, interp)) = index.runtime_build(pv, &rec.kind, platform, arch) else {
+            continue;
+        };
+        p.artifact_url = art.url.clone();
+        p.sha256 = art.sha256.clone();
+        p.interpreter = Some(PlacedInterpreter {
+            kind: interp.kind.clone(),
+            version: interp.version.clone(),
+            abi: interp.abi.clone(),
+            sha256: interp.sha256.clone(),
+        });
+        match store(state).place(p) {
+            Ok(()) => tracing::info!(
+                runtime_id = %rec.runtime_id, plugin_id = %p.plugin_id,
+                interpreter = %interp.version, "chose an interpreter for an older placement"
+            ),
+            Err(e) => tracing::warn!(plugin_id = %p.plugin_id, error = %e,
+                "could not store the interpreter chosen for a placement"),
+        }
+    }
 }
 
 // ── GET /plugin-runtimes/{id}/artifacts/{plugin_id} ──────────────────────────
@@ -712,8 +804,8 @@ pub async fn get_placement_artifact(
     // Re-resolve rather than trusting the URL recorded at placement time: this
     // re-runs signature verification over the index, so a stored row can never
     // become a way to fetch something the registry no longer vouches for.
-    let pv = match reg
-        .version_of(&plugin_id, Some(&placement.version), state.homecore_version)
+    let (pv, index) = match reg
+        .version_and_index(&plugin_id, Some(&placement.version), state.homecore_version)
         .await
     {
         Ok(v) => v,
@@ -730,12 +822,33 @@ pub async fn get_placement_artifact(
             "this runtime has not said what it runs on yet; it does when it connects",
         );
     };
-    let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, arch) else {
+    // The build for the series the placement's interpreter belongs to: the
+    // runtime makes the environment from that interpreter, and wheels for
+    // another series would not import in it.
+    let platform = platform_of(&rec.abi);
+    let art = match &placement.interpreter {
+        Some(interp) => pv.artifacts.iter().find(|a| {
+            a.runtime == rec.kind
+                && a.arch == arch
+                && platform_of(&a.abi) == platform
+                && series_of(&a.abi) == Some(interp.abi.as_str())
+        }),
+        None => index
+            .runtime_build(&pv, &rec.kind, platform, arch)
+            .map(|(a, _)| a),
+    };
+    let Some(art) = art else {
         return err(
             StatusCode::CONFLICT,
             format!(
-                "{plugin_id} {} no longer publishes a {} {} artifact for {arch}",
-                placement.version, rec.kind, rec.abi
+                "{plugin_id} {} no longer publishes a {} {platform} build for {arch}{}",
+                placement.version,
+                rec.kind,
+                placement
+                    .interpreter
+                    .as_ref()
+                    .map(|i| format!(" on {} {}", i.kind, i.version))
+                    .unwrap_or_default()
             ),
         );
     };
@@ -781,6 +894,393 @@ pub async fn get_placement_artifact(
         bytes,
     )
         .into_response()
+}
+
+// ── GET /plugin-runtimes/{id}/interpreters/{kind}/{version} ─────────────────
+
+/// Serve an interpreter a placement on this runtime runs on.
+///
+/// The same boundary as artifacts: core re-reads and verifies the signed
+/// index, downloads the interpreter and checks its sha256; the runtime checks
+/// only the sha256 core hands it. Only an interpreter one of the runtime's own
+/// placements names is served, so the endpoint is no way to fetch anything
+/// else from the registry.
+pub async fn get_placement_interpreter(
+    State(state): State<AppState>,
+    Path((id, kind, version)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let Some(rec) = authenticate_runtime(&state, &id, &headers) else {
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+    let Some(reg) = state.registry.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin registry is configured",
+        );
+    };
+    let placed = match store(&state).placements_for(&rec.runtime_id) {
+        Ok(list) => list.into_iter().any(|p| {
+            p.interpreter
+                .is_some_and(|i| i.kind == kind && i.version == version)
+        }),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
+    };
+    if !placed {
+        return err(
+            StatusCode::NOT_FOUND,
+            "no placement on this runtime runs on that interpreter",
+        );
+    }
+    let Some(arch) = rec.arch.as_deref() else {
+        return err(
+            StatusCode::CONFLICT,
+            "this runtime has not said what it runs on yet; it does when it connects",
+        );
+    };
+    let index = match reg.index().await {
+        Ok(i) => i,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("registry lookup failed: {e:#}"),
+            )
+        }
+    };
+    let Some(interp) = index.interpreter(&kind, &version, arch) else {
+        return err(
+            StatusCode::CONFLICT,
+            format!("the registry no longer lists {kind} {version} for {arch}"),
+        );
+    };
+    let file = match reg.download_interpreter(interp).await {
+        Ok(f) => f,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("interpreter download failed: {e:#}"),
+            )
+        }
+    };
+    let bytes = match std::fs::read(file.path()) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading verified interpreter: {e}"),
+            )
+        }
+    };
+    tracing::info!(
+        runtime_id = %rec.runtime_id, %kind, %version,
+        bytes = bytes.len(), "served a verified interpreter to a runtime"
+    );
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_string(),
+            ),
+            (
+                axum::http::HeaderName::from_static("x-hc-sha256"),
+                interp.sha256.clone(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+// ── Interpreter updates (admin) ──────────────────────────────────────────────
+
+/// One interpreter series in use on one runtime, and whether the index has a
+/// newer patch of it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InterpreterUse {
+    pub runtime_id: String,
+    pub kind: String,
+    /// e.g. `cp313`.
+    pub series: String,
+    /// The versions its plugins run on now; normally one.
+    pub versions: Vec<String>,
+    /// The newest the index lists, when it is newer than one in use.
+    pub update: Option<String>,
+    /// True when the series gets no more fixes upstream.
+    pub eol: bool,
+    /// The plugins on this runtime that run on it, and so restart when it is
+    /// updated.
+    pub plugins: Vec<String>,
+}
+
+/// Group a runtime's placements by interpreter series, against the index.
+pub fn interpreter_uses(
+    runtime_id: &str,
+    arch: Option<&str>,
+    placements: &[hc_state::plugin_runtime_store::PlacementRecord],
+    index: &crate::registry::RegistryIndex,
+) -> Vec<InterpreterUse> {
+    let mut out: Vec<InterpreterUse> = Vec::new();
+    for p in placements.iter().filter(|p| p.runtime_id == runtime_id) {
+        let Some(i) = &p.interpreter else { continue };
+        let at = match out
+            .iter()
+            .position(|u| u.kind == i.kind && u.series == i.abi)
+        {
+            Some(at) => at,
+            None => {
+                out.push(InterpreterUse {
+                    runtime_id: runtime_id.to_string(),
+                    kind: i.kind.clone(),
+                    series: i.abi.clone(),
+                    versions: Vec::new(),
+                    update: None,
+                    eol: false,
+                    plugins: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        let u = &mut out[at];
+        if !u.versions.contains(&i.version) {
+            u.versions.push(i.version.clone());
+        }
+        u.plugins.push(p.plugin_id.clone());
+    }
+    for u in &mut out {
+        u.versions
+            .sort_by(|a, b| crate::registry::compare_versions(a, b));
+        u.plugins.sort();
+        let newest = arch.and_then(|arch| index.newest_interpreter(&u.kind, &u.series, arch));
+        if let Some(newest) = newest {
+            u.eol = newest.eol;
+            let behind = u.versions.iter().any(|v| {
+                crate::registry::compare_versions(&newest.version, v) == std::cmp::Ordering::Greater
+            });
+            if behind {
+                u.update = Some(newest.version.clone());
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.kind, &a.series).cmp(&(&b.kind, &b.series)));
+    out
+}
+
+/// `GET /plugin-runtimes/interpreters`: the interpreters each runtime's
+/// plugins run on, and the updates waiting for them.
+///
+/// Updates wait here for an admin. An interpreter update restarts every plugin
+/// on that series, so nothing applies one on its own.
+pub async fn list_interpreters(
+    State(state): State<AppState>,
+    _: crate::auth_middleware::PluginsRead,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let Some(reg) = state.registry.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin registry is configured",
+        );
+    };
+    let store = store(&state);
+    let (runtimes, placements) = match (store.list(), store.all_placements()) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"))
+        }
+    };
+    let index = match reg.index().await {
+        Ok(i) => i,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("registry lookup failed: {e:#}"),
+            )
+        }
+    };
+    let uses: Vec<InterpreterUse> = runtimes
+        .iter()
+        .flat_map(|r| interpreter_uses(&r.runtime_id, r.arch.as_deref(), &placements, &index))
+        .collect();
+    (StatusCode::OK, Json(json!({ "interpreters": uses }))).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateInterpreterRequest {
+    /// e.g. `python`.
+    pub kind: String,
+    /// e.g. `cp313`.
+    pub series: String,
+}
+
+/// `POST /plugin-runtimes/{id}/interpreters/update`: move every plugin on this
+/// runtime that runs on one series to its newest patch.
+///
+/// Each placement keeps its plugin version and config and gets the new
+/// interpreter. The runtime builds new environments beside the old ones from
+/// the wheels it already has, then restarts each plugin on its new one.
+pub async fn update_interpreter(
+    State(state): State<AppState>,
+    PluginsWrite(claims): PluginsWrite,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateInterpreterRequest>,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let Some(reg) = state.registry.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin registry is configured",
+        );
+    };
+    let store = store(&state);
+    let Ok(Some(rec)) = store.get(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+    let Some(arch) = rec.arch.as_deref() else {
+        return err(
+            StatusCode::CONFLICT,
+            "this runtime has not said what it runs on yet; it does when it connects",
+        );
+    };
+    let index = match reg.index().await {
+        Ok(i) => i,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("registry lookup failed: {e:#}"),
+            )
+        }
+    };
+    let Some(newest) = index.newest_interpreter(&req.kind, &req.series, arch) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            format!(
+                "the registry lists no {} {} for {arch}",
+                req.kind, req.series
+            ),
+        );
+    };
+    let placements = match store.placements_for(&id) {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
+    };
+    let mut moved = Vec::new();
+    for mut p in placements {
+        let Some(i) = &p.interpreter else { continue };
+        if i.kind != req.kind || i.abi != req.series || i.version == newest.version {
+            continue;
+        }
+        let from = i.version.clone();
+        p.interpreter = Some(PlacedInterpreter {
+            kind: newest.kind.clone(),
+            version: newest.version.clone(),
+            abi: newest.abi.clone(),
+            sha256: newest.sha256.clone(),
+        });
+        if let Err(e) = store.place(&p) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+        }
+        moved.push(json!({ "plugin_id": p.plugin_id, "from": from }));
+    }
+    if !moved.is_empty() {
+        nudge_runtime(&state, &id);
+        let e = crate::audit::entry_from_claims(&claims, "plugin_runtime.interpreter_updated")
+            .with_target("plugin_runtime", id.clone());
+        crate::audit::emit(&state, e).await;
+        tracing::info!(
+            runtime_id = %id, kind = %req.kind, version = %newest.version,
+            plugins = moved.len(), "interpreter update placed"
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "runtime_id": id,
+            "kind": newest.kind,
+            "version": newest.version,
+            "plugins": moved,
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod interpreter_tests {
+    use super::*;
+    use hc_state::plugin_runtime_store::PlacementRecord;
+
+    fn placed(rt: &str, plugin: &str, python: Option<&str>) -> PlacementRecord {
+        PlacementRecord {
+            runtime_id: rt.into(),
+            plugin_id: plugin.into(),
+            version: "0.1.0".into(),
+            artifact_url: String::new(),
+            sha256: String::new(),
+            config: String::new(),
+            placed_at: Utc::now(),
+            interpreter: python.map(|v| PlacedInterpreter {
+                kind: "python".into(),
+                version: v.into(),
+                abi: format!("cp{}", v.split('.').take(2).collect::<String>()),
+                sha256: String::new(),
+            }),
+        }
+    }
+
+    fn index(newest_313: &str, eol: bool) -> crate::registry::RegistryIndex {
+        serde_json::from_value(json!({
+            "interpreters": [
+                {"kind": "python", "version": "3.12.16", "abi": "cp312", "os": "linux",
+                 "arch": "x86_64", "url": "i", "sha256": "1", "eol": eol},
+                {"kind": "python", "version": newest_313, "abi": "cp313", "os": "linux",
+                 "arch": "x86_64", "url": "i", "sha256": "2"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn uses_are_grouped_by_series_and_say_what_would_restart() {
+        let placements = vec![
+            placed("rt-a", "plugin.b", Some("3.13.17")),
+            placed("rt-a", "plugin.a", Some("3.13.17")),
+            placed("rt-a", "plugin.c", Some("3.12.16")),
+            placed("rt-a", "plugin.old", None),
+            placed("rt-b", "plugin.d", Some("3.13.17")),
+        ];
+        let uses = interpreter_uses("rt-a", Some("x86_64"), &placements, &index("3.13.18", true));
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].series, "cp312");
+        assert_eq!(uses[0].update, None);
+        assert!(uses[0].eol);
+        assert_eq!(uses[1].series, "cp313");
+        assert_eq!(uses[1].versions, vec!["3.13.17"]);
+        assert_eq!(uses[1].update.as_deref(), Some("3.13.18"));
+        assert_eq!(uses[1].plugins, vec!["plugin.a", "plugin.b"]);
+    }
+
+    #[test]
+    fn a_runtime_on_the_newest_patch_has_no_update() {
+        let placements = vec![placed("rt-a", "plugin.a", Some("3.13.18"))];
+        let uses = interpreter_uses(
+            "rt-a",
+            Some("x86_64"),
+            &placements,
+            &index("3.13.18", false),
+        );
+        assert_eq!(uses[0].update, None);
+        // Before it has said what it runs on, nothing can be offered.
+        let placements = vec![placed("rt-a", "plugin.a", Some("3.13.17"))];
+        let uses = interpreter_uses("rt-a", None, &placements, &index("3.13.18", false));
+        assert_eq!(uses[0].update, None);
+    }
 }
 
 #[cfg(test)]

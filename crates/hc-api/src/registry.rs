@@ -80,6 +80,32 @@ pub struct RegistryPlugin {
     pub versions: Vec<PluginVersion>,
 }
 
+/// An interpreter plugin runtimes run plugins on, built by
+/// homeCore-io/interpreters. See `docs/pythonInterpretersPlan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Interpreter {
+    /// e.g. `python`, the runtime kind it serves.
+    pub kind: String,
+    /// e.g. `3.13.18`.
+    pub version: String,
+    /// The series a plugin's ABI tag names, e.g. `cp313`.
+    pub abi: String,
+    pub os: String,
+    pub arch: String,
+    pub url: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub key_id: String,
+    /// The python-build-standalone release it was built from.
+    #[serde(default)]
+    pub upstream: String,
+    /// True once its series gets no more fixes upstream.
+    #[serde(default)]
+    pub eol: bool,
+}
+
 /// The signed index document (the exact bytes of `index.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryIndex {
@@ -87,11 +113,60 @@ pub struct RegistryIndex {
     pub schema: String,
     #[serde(default)]
     pub plugins: Vec<RegistryPlugin>,
+    #[serde(default)]
+    pub interpreters: Vec<Interpreter>,
 }
 
 impl RegistryIndex {
     pub fn plugin(&self, id: &str) -> Option<&RegistryPlugin> {
         self.plugins.iter().find(|p| p.id == id)
+    }
+
+    /// The newest interpreter of a series, for a runtime on `arch`.
+    pub fn newest_interpreter(&self, kind: &str, series: &str, arch: &str) -> Option<&Interpreter> {
+        self.interpreters
+            .iter()
+            .filter(|i| i.kind == kind && i.abi == series && i.os == "linux" && i.arch == arch)
+            .reduce(
+                |best, i| match compare_versions(&i.version, &best.version) {
+                    std::cmp::Ordering::Greater => i,
+                    _ => best,
+                },
+            )
+    }
+
+    /// One interpreter by its exact version.
+    pub fn interpreter(&self, kind: &str, version: &str, arch: &str) -> Option<&Interpreter> {
+        self.interpreters
+            .iter()
+            .find(|i| i.kind == kind && i.version == version && i.os == "linux" && i.arch == arch)
+    }
+
+    /// What a runtime of `kind` on `platform` and `arch` would run of `pv`: the
+    /// artifact, and the newest interpreter of its series.
+    ///
+    /// When a version publishes builds for several series, the newest series
+    /// that has an interpreter wins. An artifact whose series has no interpreter
+    /// in the index is skipped, since nothing could run it.
+    pub fn runtime_build<'a>(
+        &'a self,
+        pv: &'a PluginVersion,
+        kind: &str,
+        platform: &str,
+        arch: &str,
+    ) -> Option<(&'a ArtifactRef, &'a Interpreter)> {
+        pv.artifacts
+            .iter()
+            .filter(|a| {
+                a.runtime == kind
+                    && a.arch == arch
+                    && hc_api_types::plugin_runtimes::platform_of(&a.abi) == platform
+            })
+            .filter_map(|a| {
+                let series = hc_api_types::plugin_runtimes::series_of(&a.abi)?;
+                Some((a, self.newest_interpreter(kind, series, arch)?))
+            })
+            .max_by(|(_, x), (_, y)| compare_versions(&x.version, &y.version))
     }
 }
 
@@ -201,20 +276,6 @@ impl PluginVersion {
         self.artifacts
             .iter()
             .find(|a| a.is_native() && a.os == os && a.arch == arch)
-    }
-
-    /// The artifact matching a runtime's advertised triple.
-    ///
-    /// Exact equality on all three, and both sides are pinned — the base image
-    /// fixes the ABI and the build pipeline stamps it. A comparison (`this
-    /// manylinux_2_28 wheel runs on any glibc >= 2.28`) is the honest rule and
-    /// arrives when a second ABI actually exists; until then an exact match
-    /// fails loudly, where a wrong comparison would fail at import time inside
-    /// the container.
-    pub fn artifact_for_runtime(&self, kind: &str, abi: &str, arch: &str) -> Option<&ArtifactRef> {
-        self.artifacts
-            .iter()
-            .find(|a| a.runtime == kind && a.abi == abi && a.arch == arch)
     }
 
     /// Runtime kinds this version publishes for, native excluded.
@@ -344,29 +405,20 @@ impl RegistryClient {
         version: Option<&str>,
         core: &str,
     ) -> Result<PluginVersion> {
+        Ok(self.version_and_index(id, version, core).await?.0)
+    }
+
+    /// [`Self::version_of`], with the verified index it came from, for a caller
+    /// that also needs the interpreters it lists.
+    pub async fn version_and_index(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        core: &str,
+    ) -> Result<(PluginVersion, RegistryIndex)> {
         let idx = self.index().await?;
-        let plugin = idx
-            .plugin(id)
-            .ok_or_else(|| anyhow!("plugin `{id}` is not in the registry"))?;
-        let pv = match version {
-            Some(v) => plugin
-                .version(v)
-                .ok_or_else(|| anyhow!("version `{v}` of `{id}` not found"))?,
-            None => match plugin.latest_for(core) {
-                Some(pv) => pv,
-                None => {
-                    let newest = plugin
-                        .latest()
-                        .ok_or_else(|| anyhow!("`{id}` has no published versions"))?;
-                    return Err(anyhow!(
-                        "no version of `{id}` runs on homeCore {core}: the newest, {}, needs {}",
-                        newest.version,
-                        newest.min_core
-                    ));
-                }
-            },
-        };
-        Ok(pv.clone())
+        let pv = version_in(&idx, id, version, core)?;
+        Ok((pv, idx))
     }
 
     /// Resolve `(artifact, resolved_version)` for `id` (latest, or a specific
@@ -394,20 +446,61 @@ impl RegistryClient {
     /// Download an artifact to a temp file and verify its sha256. Returns the
     /// temp file (kept alive by the caller until the install reads it).
     pub async fn download_artifact(&self, art: &ArtifactRef) -> Result<tempfile::NamedTempFile> {
-        let bytes = fetch_bytes(&self.http, &art.url)
+        self.download_verified(&art.url, &art.sha256).await
+    }
+
+    /// Download an interpreter and verify its sha256, as for an artifact.
+    pub async fn download_interpreter(
+        &self,
+        interp: &Interpreter,
+    ) -> Result<tempfile::NamedTempFile> {
+        self.download_verified(&interp.url, &interp.sha256).await
+    }
+
+    async fn download_verified(&self, url: &str, sha256: &str) -> Result<tempfile::NamedTempFile> {
+        let bytes = fetch_bytes(&self.http, url)
             .await
-            .with_context(|| format!("downloading artifact {}", art.url))?;
+            .with_context(|| format!("downloading artifact {url}"))?;
         let got = sha256_hex(&bytes);
-        if !got.eq_ignore_ascii_case(art.sha256.trim()) {
-            bail!(
-                "artifact sha256 mismatch: expected {}, got {got}",
-                art.sha256
-            );
+        if !got.eq_ignore_ascii_case(sha256.trim()) {
+            bail!("artifact sha256 mismatch: expected {sha256}, got {got}");
         }
         let mut f = tempfile::NamedTempFile::new().context("creating temp artifact file")?;
         std::io::Write::write_all(&mut f, &bytes).context("writing downloaded artifact")?;
         Ok(f)
     }
+}
+
+/// A version of `id` in `idx`: the one named, or the newest that runs on
+/// homeCore `core`.
+fn version_in(
+    idx: &RegistryIndex,
+    id: &str,
+    version: Option<&str>,
+    core: &str,
+) -> Result<PluginVersion> {
+    let plugin = idx
+        .plugin(id)
+        .ok_or_else(|| anyhow!("plugin `{id}` is not in the registry"))?;
+    let pv = match version {
+        Some(v) => plugin
+            .version(v)
+            .ok_or_else(|| anyhow!("version `{v}` of `{id}` not found"))?,
+        None => match plugin.latest_for(core) {
+            Some(pv) => pv,
+            None => {
+                let newest = plugin
+                    .latest()
+                    .ok_or_else(|| anyhow!("`{id}` has no published versions"))?;
+                return Err(anyhow!(
+                    "no version of `{id}` runs on homeCore {core}: the newest, {}, needs {}",
+                    newest.version,
+                    newest.min_core
+                ));
+            }
+        },
+    };
+    Ok(pv.clone())
 }
 
 /// Fetch bytes from an `http(s)://` URL, a `file://` URL, or a plain local path.
@@ -451,6 +544,71 @@ mod tests {
         assert_eq!(v.version, "1.2.0");
         assert!(v.artifact_for("linux", "x86_64").is_some());
         assert!(v.artifact_for("linux", "aarch64").is_none());
+    }
+
+    fn with_interpreters() -> RegistryIndex {
+        serde_json::from_value(serde_json::json!({
+            "schema": "1",
+            "plugins": [{
+                "id": "plugin.mcp",
+                "versions": [{
+                    "version": "0.2.0",
+                    "artifacts": [
+                        {"os": "linux", "arch": "x86_64", "runtime": "python",
+                         "abi": "cp312-manylinux_2_28", "url": "u12", "sha256": "a"},
+                        {"os": "linux", "arch": "x86_64", "runtime": "python",
+                         "abi": "cp313-manylinux_2_28", "url": "u13", "sha256": "b"},
+                        {"os": "linux", "arch": "x86_64", "runtime": "python",
+                         "abi": "cp315-manylinux_2_28", "url": "u15", "sha256": "c"}
+                    ]
+                }]
+            }],
+            "interpreters": [
+                {"kind": "python", "version": "3.12.16", "abi": "cp312", "os": "linux",
+                 "arch": "x86_64", "url": "i", "sha256": "1"},
+                {"kind": "python", "version": "3.13.9", "abi": "cp313", "os": "linux",
+                 "arch": "x86_64", "url": "i", "sha256": "2"},
+                {"kind": "python", "version": "3.13.18", "abi": "cp313", "os": "linux",
+                 "arch": "x86_64", "url": "i", "sha256": "3"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_index_without_interpreters_still_reads() {
+        let index: RegistryIndex = serde_json::from_slice(&sample()).unwrap();
+        assert!(index.interpreters.is_empty());
+    }
+
+    #[test]
+    fn the_newest_patch_of_a_series_is_chosen_by_number() {
+        let index = with_interpreters();
+        let i = index
+            .newest_interpreter("python", "cp313", "x86_64")
+            .unwrap();
+        assert_eq!(i.version, "3.13.18");
+        assert!(index
+            .newest_interpreter("python", "cp313", "aarch64")
+            .is_none());
+    }
+
+    #[test]
+    fn a_runtime_gets_the_newest_series_the_index_can_run() {
+        let index = with_interpreters();
+        let pv = &index.plugin("plugin.mcp").unwrap().versions[0];
+        // cp315 is published but has no interpreter, so cp313 wins.
+        let (art, interp) = index
+            .runtime_build(pv, "python", "manylinux_2_28", "x86_64")
+            .unwrap();
+        assert_eq!(art.url, "u13");
+        assert_eq!(interp.version, "3.13.18");
+        assert!(index
+            .runtime_build(pv, "python", "manylinux_2_34", "x86_64")
+            .is_none());
+        assert!(index
+            .runtime_build(pv, "node", "manylinux_2_28", "x86_64")
+            .is_none());
     }
 
     fn plugin_with(versions: &[&str]) -> RegistryPlugin {

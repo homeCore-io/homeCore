@@ -13,10 +13,11 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The oldest runtime host this homeCore works with. 0.2.0 is the first that
-/// connects with a key; an older one cannot reach this homeCore at all.
+/// The oldest runtime host this homeCore works with. 0.2.3 is the first that
+/// runs plugins on the interpreter they are placed with; an older image brings
+/// its own Python, and its hello is refused with what to do about it.
 /// Raise it when core needs something a runtime only does from a later version.
-pub const MIN_HOST_VERSION: &str = "0.2.0";
+pub const MIN_HOST_VERSION: &str = "0.2.3";
 
 /// True when a runtime reported a host older than [`MIN_HOST_VERSION`]. A
 /// runtime that has not reported one yet is not called outdated.
@@ -217,7 +218,8 @@ mod tests {
     #[test]
     fn an_older_host_is_outdated_and_an_unknown_one_is_not() {
         assert!(is_outdated(Some("0.1.0")));
-        assert!(!is_outdated(Some("0.2.0")));
+        assert!(is_outdated(Some("0.2.2")));
+        assert!(!is_outdated(Some("0.2.3")));
         assert!(!is_outdated(Some("0.10.0")));
         assert!(!is_outdated(None));
     }

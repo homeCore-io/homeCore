@@ -16,6 +16,8 @@ pub struct Candidate {
     /// What the admin called it, for messages.
     pub name: String,
     pub kind: String,
+    /// The platform it provides, e.g. `manylinux_2_28`. The interpreter is the
+    /// plugin's, from the registry, so it is not part of matching.
     pub abi: String,
     pub arch: String,
     /// `(holds, limit)` when it already holds as many plugins as it may, and
@@ -48,7 +50,7 @@ pub fn candidates(
                 runtime_id: r.runtime_id.clone(),
                 name: r.name.clone(),
                 kind: r.kind.clone(),
-                abi: r.abi.clone(),
+                abi: hc_api_types::plugin_runtimes::platform_of(&r.abi).to_string(),
                 arch: r.arch.clone()?,
                 full,
             })
@@ -73,7 +75,8 @@ pub enum Placement {
 pub struct Offered<'a> {
     /// True when a native artifact exists for this host.
     pub native_for_this_host: bool,
-    /// `(kind, abi, arch)` for every runtime artifact this version publishes.
+    /// `(kind, platform, arch)` for every runtime artifact this version
+    /// publishes that the index has an interpreter for.
     pub runtime_artifacts: Vec<(&'a str, &'a str, &'a str)>,
     /// Runtime kinds published, for the error message.
     pub kinds: Vec<&'a str>,
@@ -203,7 +206,7 @@ mod tests {
     fn python_only<'a>() -> Offered<'a> {
         Offered {
             native_for_this_host: false,
-            runtime_artifacts: vec![("python", "cp312-manylinux_2_28", "x86_64")],
+            runtime_artifacts: vec![("python", "manylinux_2_28", "x86_64")],
             kinds: vec!["python"],
         }
     }
@@ -214,16 +217,16 @@ mod tests {
     fn native_goes_to_core() {
         let offered = Offered {
             native_for_this_host: true,
-            runtime_artifacts: vec![("python", "cp312-manylinux_2_28", "x86_64")],
+            runtime_artifacts: vec![("python", "manylinux_2_28", "x86_64")],
             kinds: vec!["python"],
         };
-        let rts = vec![rt("rt-a", "python", "cp312-manylinux_2_28", "x86_64")];
+        let rts = vec![rt("rt-a", "python", "manylinux_2_28", "x86_64")];
         assert_eq!(decide(&offered, &rts, None), Placement::Core);
     }
 
     #[test]
     fn one_matching_runtime_is_chosen_without_asking() {
-        let rts = vec![rt("rt-a", "python", "cp312-manylinux_2_28", "x86_64")];
+        let rts = vec![rt("rt-a", "python", "manylinux_2_28", "x86_64")];
         assert_eq!(
             decide(&python_only(), &rts, None),
             Placement::Runtime("rt-a".into())
@@ -235,8 +238,8 @@ mod tests {
     #[test]
     fn several_matching_runtimes_ask() {
         let rts = vec![
-            rt("rt-a", "python", "cp312-manylinux_2_28", "x86_64"),
-            rt("rt-b", "python", "cp312-manylinux_2_28", "x86_64"),
+            rt("rt-a", "python", "manylinux_2_28", "x86_64"),
+            rt("rt-b", "python", "manylinux_2_28", "x86_64"),
         ];
         match decide(&python_only(), &rts, None) {
             Placement::Ambiguous(ids) => assert_eq!(ids, vec!["rt-a", "rt-b"]),
@@ -253,7 +256,7 @@ mod tests {
             runtime_id: "rt-new".into(),
             name: "Python runtime 1".into(),
             kind: "python".into(),
-            abi: "cp312-manylinux_2_28".into(),
+            abi: "manylinux_2_28".into(),
             plugin_id: "plugin.python-rtnew".into(),
             key_hash: "h".into(),
             homecore_url: "http://homecore.local:8080".into(),
@@ -283,6 +286,7 @@ mod tests {
             sha256: String::new(),
             config: String::new(),
             placed_at: chrono::Utc::now(),
+            interpreter: None,
         }
     }
 
@@ -291,7 +295,7 @@ mod tests {
             runtime_id: "rt-pi".into(),
             name: "Pi".into(),
             kind: "python".into(),
-            abi: "cp312-manylinux_2_28".into(),
+            abi: "manylinux_2_28".into(),
             plugin_id: "plugin.python-rtpi".into(),
             key_hash: "h".into(),
             homecore_url: "http://h:8080".into(),
@@ -352,18 +356,21 @@ mod tests {
         assert!(msg.contains("none is connected"), "{msg}");
     }
 
-    /// Having a python runtime of the wrong ABI is a different problem from
+    /// Having a python runtime for the wrong platform is a different problem from
     /// having none, and the fix is different too.
     #[test]
     fn a_mismatched_runtime_says_what_it_has() {
-        let rts = vec![rt("rt-old", "python", "cp311-manylinux_2_28", "x86_64")];
+        let rts = vec![rt("rt-old", "python", "manylinux_2_17", "x86_64")];
         let msg = match decide(&python_only(), &rts, None) {
             Placement::Impossible(m) => m,
             other => panic!("expected impossible, got {other:?}"),
         };
         assert!(msg.contains("rt-old"), "{msg}");
-        assert!(msg.contains("cp311"), "names what it actually has: {msg}");
-        assert!(msg.contains("cp312"), "and what was needed: {msg}");
+        assert!(
+            msg.contains("manylinux_2_17"),
+            "names what it actually has: {msg}"
+        );
+        assert!(msg.contains("manylinux_2_28"), "and what was needed: {msg}");
     }
 
     /// An explicit request that cannot be honoured is refused rather than
@@ -371,8 +378,8 @@ mod tests {
     #[test]
     fn an_explicit_request_that_does_not_fit_is_refused_not_redirected() {
         let rts = vec![
-            rt("rt-good", "python", "cp312-manylinux_2_28", "x86_64"),
-            rt("rt-wrong", "python", "cp311-manylinux_2_28", "x86_64"),
+            rt("rt-good", "python", "manylinux_2_28", "x86_64"),
+            rt("rt-wrong", "python", "manylinux_2_17", "x86_64"),
         ];
         match decide(&python_only(), &rts, Some("rt-wrong")) {
             Placement::Impossible(m) => assert!(m.contains("rt-wrong"), "{m}"),
