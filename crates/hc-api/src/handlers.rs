@@ -2805,10 +2805,8 @@ pub async fn list_automations(
                             return false;
                         }
                     }
-                    if params.stale == Some(true) && r.error.is_none() {
-                        return false;
-                    }
-                    true
+                    // `stale=true` keeps only the rules that failed to load.
+                    params.stale != Some(true) || r.error.is_some()
                 })
                 .cloned()
                 .collect();
