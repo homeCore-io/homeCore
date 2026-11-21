@@ -1394,8 +1394,17 @@ Each entry is a full step-by-step execution trace:
   {
     "timestamp": "2026-03-27T15:40:00Z",
     "trigger_type": "DeviceStateChanged",
-    "trigger_context": { "device_id": "yolink_xxx", "attribute": "open", "value": false },
-    "outcome": { "type": "condition_failed", "at_index": 0, "reason": "now 02:15:00 within [12:00:00, 23:59:00] → FAIL" },
+    "trigger_context": {
+      "device_id": "yolink_xxx",
+      "attribute": "open",
+      "value": false
+    },
+    "outcome": {
+      "ConditionFailed": {
+        "at_index": 0,
+        "reason": "now 02:15:00 within [12:00:00, 23:59:00] → FAIL"
+      }
+    },
     "conditions": [
       {
         "condition_type": "time_window",
@@ -1418,8 +1427,12 @@ Each entry is a full step-by-step execution trace:
   {
     "timestamp": "2026-03-27T14:30:00Z",
     "trigger_type": "DeviceStateChanged",
-    "trigger_context": { "device_id": "yolink_xxx", "attribute": "open", "value": false },
-    "outcome": { "type": "fired" },
+    "trigger_context": {
+      "device_id": "yolink_xxx",
+      "attribute": "open",
+      "value": false
+    },
+    "outcome": "Fired",
     "conditions": [
       {
         "condition_type": "time_window",
@@ -1434,7 +1447,9 @@ Each entry is a full step-by-step execution trace:
         "index": 0,
         "action_type": "CallService",
         "description": "GET http://192.168.1.200:5005/Bathroom/favorite/0",
-        "outcome": { "status": "ok" },
+        "outcome": {
+          "status": "ok"
+        },
         "duration_ms": 142
       }
     ],
@@ -1514,10 +1529,28 @@ curl -s -X PUT http://localhost:8080/api/v1/automations/RULE_ID \
     "name": "Deck door open alert",
     "enabled": true,
     "priority": 10,
-    "tags": ["deck", "door-alerts"],
-    "trigger": { "type": "DeviceStateChanged", "device_id": "yolink_deck_door", "attribute": "open" },
+    "tags": [
+      "deck",
+      "door-alerts"
+    ],
+    "trigger": {
+      "DeviceStateChanged": {
+        "device_id": "yolink_deck_door",
+        "attribute": "open"
+      }
+    },
     "conditions": [],
-    "actions": [{ "type": "Notify", "channel": "telegram", "message": "Deck door is open" }]
+    "actions": [
+      {
+        "action": {
+          "Notify": {
+            "channel": "telegram",
+            "message": "Deck door is open"
+          }
+        },
+        "enabled": true
+      }
+    ]
   }' | jq
 ```
 
@@ -1702,29 +1735,42 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
     "enabled": true,
     "priority": 10,
     "trigger": {
-      "type": "DeviceStateChanged",
-      "device_id": "light.virtual_01",
-      "attribute": "on"
+      "DeviceStateChanged": {
+        "device_id": "light.virtual_01",
+        "attribute": "on"
+      }
     },
     "conditions": [
       {
-        "type": "DeviceState",
-        "device_id": "light.virtual_01",
-        "attribute": "brightness_pct",
-        "op": "Gt",
-        "value": 80
+        "DeviceState": {
+          "device_id": "light.virtual_01",
+          "attribute": "brightness_pct",
+          "op": "Gt",
+          "value": 80
+        }
       }
     ],
     "actions": [
       {
-        "type": "FireEvent",
-        "event_type": "bright_light_alert",
-        "payload": { "device": "light.virtual_01", "reason": "brightness_pct > 80" }
+        "action": {
+          "FireEvent": {
+            "event_type": "bright_light_alert",
+            "payload": {
+              "device": "light.virtual_01",
+              "reason": "brightness_pct > 80"
+            }
+          }
+        },
+        "enabled": true
       },
       {
-        "type": "Notify",
-        "channel": "log",
-        "message": "Virtual light is very bright!"
+        "action": {
+          "Notify": {
+            "channel": "log",
+            "message": "Virtual light is very bright!"
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq -r .id)
@@ -1805,16 +1851,63 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
     "enabled": true,
     "priority": 10,
     "trigger": {
-      "type": "WebhookReceived",
-      "path": "front-door-bell-a3f9c2"
+      "WebhookReceived": {
+        "path": "front-door-bell-a3f9c2"
+      }
     },
     "conditions": [],
     "actions": [
-      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness_pct": 100 } },
-      { "type": "Delay", "duration_secs": 1 },
-      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": false } },
-      { "type": "Delay", "duration_secs": 1 },
-      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness_pct": 70 } }
+      {
+        "action": {
+          "SetDeviceState": {
+            "device_id": "light.living_room_main",
+            "state": {
+              "on": true,
+              "brightness_pct": 100
+            }
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "Delay": {
+            "duration_secs": 1
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "SetDeviceState": {
+            "device_id": "light.living_room_main",
+            "state": {
+              "on": false
+            }
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "Delay": {
+            "duration_secs": 1
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "SetDeviceState": {
+            "device_id": "light.living_room_main",
+            "state": {
+              "on": true,
+              "brightness_pct": 70
+            }
+          }
+        },
+        "enabled": true
+      }
     ]
   }' | jq -r .id)
 
@@ -1911,15 +2004,40 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "name": "Scene: Evening Deck",
     "enabled": true,
     "priority": 10,
-    "tags": ["deck", "scenes"],
+    "tags": [
+      "deck",
+      "scenes"
+    ],
     "trigger": {
-      "type": "CustomEvent",
-      "event_type": "scene_evening_deck"
+      "CustomEvent": {
+        "event_type": "scene_evening_deck"
+      }
     },
     "conditions": [],
     "actions": [
-      { "type": "SetDeviceState", "device_id": "lutron_scene_deck_evening", "state": { "activate": true } },
-      { "type": "SetDeviceState", "device_id": "wled_deck_strip",           "state": { "on": true, "brightness_pct": 24 } }
+      {
+        "action": {
+          "SetDeviceState": {
+            "device_id": "lutron_scene_deck_evening",
+            "state": {
+              "activate": true
+            }
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "SetDeviceState": {
+            "device_id": "wled_deck_strip",
+            "state": {
+              "on": true,
+              "brightness_pct": 24
+            }
+          }
+        },
+        "enabled": true
+      }
     ]
   }' | jq
 ```
@@ -1934,19 +2052,29 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "name": "Keypad: Deck button 3 → Evening",
     "enabled": true,
     "priority": 20,
-    "tags": ["keypad", "deck"],
+    "tags": [
+      "keypad",
+      "deck"
+    ],
     "trigger": {
-      "type": "DeviceStateChanged",
-      "device_id": "keypad_deck",
-      "attribute": "button_3",
-      "to": true
+      "DeviceStateChanged": {
+        "device_id": "keypad_deck",
+        "attribute": "button_3",
+        "to": true
+      }
     },
     "conditions": [],
     "actions": [
       {
-        "type": "FireEvent",
-        "event_type": "scene_evening_deck",
-        "payload": { "source": "keypad_deck_button_3" }
+        "action": {
+          "FireEvent": {
+            "event_type": "scene_evening_deck",
+            "payload": {
+              "source": "keypad_deck_button_3"
+            }
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq
@@ -2006,10 +2134,13 @@ Use `CallService` when a rule needs to reach out to an external service — a Sl
 
 ```json
 {
-  "type": "CallService",
-  "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
-  "method": "POST",
-  "body": { "text": "Front door opened!" }
+  "CallService": {
+    "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+    "method": "POST",
+    "body": {
+      "text": "Front door opened!"
+    }
+  }
 }
 ```
 
@@ -2017,12 +2148,16 @@ Use `CallService` when a rule needs to reach out to an external service — a Sl
 
 ```json
 {
-  "type": "CallService",
-  "url": "https://api.example.com/notify",
-  "method": "POST",
-  "body": { "event": "motion_detected", "zone": "driveway" },
-  "timeout_ms": 5000,
-  "retries": 2
+  "CallService": {
+    "url": "https://api.example.com/notify",
+    "method": "POST",
+    "body": {
+      "event": "motion_detected",
+      "zone": "driveway"
+    },
+    "timeout_ms": 5000,
+    "retries": 2
+  }
 }
 ```
 
@@ -2041,17 +2176,26 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
     "name": "Fetch weather on sunrise",
     "enabled": true,
     "priority": 10,
-    "trigger": { "type": "SunEvent", "event": "Sunrise", "offset_minutes": 0 },
+    "trigger": {
+      "SunEvent": {
+        "event": "Sunrise",
+        "offset_minutes": 0
+      }
+    },
     "conditions": [],
     "actions": [
       {
-        "type": "CallService",
-        "url": "http://api.example.com/weather/current",
-        "method": "GET",
-        "body": null,
-        "timeout_ms": 8000,
-        "retries": 1,
-        "response_event": "weather_fetched"
+        "action": {
+          "CallService": {
+            "url": "http://api.example.com/weather/current",
+            "method": "GET",
+            "body": null,
+            "timeout_ms": 8000,
+            "retries": 1,
+            "response_event": "weather_fetched"
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq -r .id)
@@ -2065,15 +2209,20 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "enabled": true,
     "priority": 5,
     "trigger": {
-      "type": "MqttMessage",
-      "topic_pattern": "homecore/events/weather_fetched"
+      "MqttMessage": {
+        "topic_pattern": "homecore/events/weather_fetched"
+      }
     },
     "conditions": [],
     "actions": [
       {
-        "type": "Notify",
-        "channel": "log",
-        "message": "Weather data received"
+        "action": {
+          "Notify": {
+            "channel": "log",
+            "message": "Weather data received"
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq
@@ -2327,18 +2476,25 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "name": "Hourly sensor check",
     "enabled": true,
     "priority": 5,
-    "tags": ["monitoring"],
+    "tags": [
+      "monitoring"
+    ],
     "trigger": {
-      "type": "cron",
-      "expression": "0 0 * * * *"
+      "Cron": {
+        "expression": "0 0 * * * *"
+      }
     },
     "conditions": [],
     "actions": [
       {
-        "type": "call_service",
-        "url": "http://localhost:9000/health",
-        "method": "GET",
-        "body": {}
+        "action": {
+          "CallService": {
+            "url": "http://localhost:9000/health",
+            "method": "GET",
+            "body": {}
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq '{id, name}'
@@ -2491,13 +2647,15 @@ value     = true
 
 ```json
 {
-  "type": "not",
-  "condition": {
-    "type": "device_state",
-    "device_id": "switch_vacation",
-    "attribute": "on",
-    "op": "eq",
-    "value": true
+  "Not": {
+    "condition": {
+      "DeviceState": {
+        "device_id": "switch_vacation",
+        "attribute": "on",
+        "op": "eq",
+        "value": true
+      }
+    }
   }
 }
 ```
@@ -2513,28 +2671,37 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "name": "Motion alert (not during sleep hours)",
     "enabled": true,
     "priority": 10,
-    "tags": ["security"],
+    "tags": [
+      "security"
+    ],
     "trigger": {
-      "type": "device_state_changed",
-      "device_id": "hue_motion_hallway",
-      "attribute": "motion",
-      "to": true
+      "DeviceStateChanged": {
+        "device_id": "hue_motion_hallway",
+        "attribute": "motion",
+        "to": true
+      }
     },
     "conditions": [
       {
-        "type": "not",
-        "condition": {
-          "type": "time_window",
-          "start": "22:00",
-          "end": "07:00"
+        "Not": {
+          "condition": {
+            "TimeWindow": {
+              "start": "22:00",
+              "end": "07:00"
+            }
+          }
         }
       }
     ],
     "actions": [
       {
-        "type": "notify",
-        "channel": "telegram",
-        "message": "Motion detected in hallway"
+        "action": {
+          "Notify": {
+            "channel": "telegram",
+            "message": "Motion detected in hallway"
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq '{id, name}'
@@ -2552,7 +2719,7 @@ curl -s -X POST http://localhost:8080/api/v1/automations/<ID>/test \
 ```json
 [
   {
-    "condition": { "type": "not", "condition": { "type": "device_state", ... } },
+    "condition": { "Not": { "condition": { "DeviceState": { ... } } } },
     "passed": true,
     "actual": null,
     "expected": null,
@@ -3513,42 +3680,58 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name":     "Door left open at night",
-    "enabled":  true,
+    "name": "Door left open at night",
+    "enabled": true,
     "priority": 20,
     "trigger": {
-      "type":      "DeviceStateChanged",
-      "device_id": "sensor.front_door"
+      "DeviceStateChanged": {
+        "device_id": "sensor.front_door"
+      }
     },
     "conditions": [
       {
-        "type":      "DeviceState",
-        "device_id": "sensor.front_door",
-        "attribute": "open",
-        "op":        "Eq",
-        "value":     true
+        "DeviceState": {
+          "device_id": "sensor.front_door",
+          "attribute": "open",
+          "op": "Eq",
+          "value": true
+        }
       },
       {
-        "type":  "TimeWindow",
-        "start": "22:00:00",
-        "end":   "07:00:00"
+        "TimeWindow": {
+          "start": "22:00:00",
+          "end": "07:00:00"
+        }
       }
     ],
     "actions": [
-      { "Delay": { "duration_secs": 600 } },
       {
-        "Notify": {
-          "channel": "urgent",
-          "title":   "Front door still open",
-          "message": "The front door has been open for 10 minutes"
-        }
+        "action": {
+          "Delay": {
+            "duration_secs": 600
+          }
+        },
+        "enabled": true
       },
       {
-        "Notify": {
-          "channel": "email",
-          "title":   "Front door still open",
-          "message": "The front door has been open for 10 minutes"
-        }
+        "action": {
+          "Notify": {
+            "channel": "urgent",
+            "title": "Front door still open",
+            "message": "The front door has been open for 10 minutes"
+          }
+        },
+        "enabled": true
+      },
+      {
+        "action": {
+          "Notify": {
+            "channel": "email",
+            "title": "Front door still open",
+            "message": "The front door has been open for 10 minutes"
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq
@@ -3563,30 +3746,47 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name":     "High temperature alert",
-    "enabled":  true,
+    "name": "High temperature alert",
+    "enabled": true,
     "priority": 10,
     "trigger": {
-      "type":      "DeviceStateChanged",
-      "device_id": "sensor.outdoor_weather"
+      "DeviceStateChanged": {
+        "device_id": "sensor.outdoor_weather"
+      }
     },
     "conditions": [
       {
-        "type":      "DeviceState",
-        "device_id": "sensor.outdoor_weather",
-        "attribute": "temperature",
-        "op":        "Gt",
-        "value":     35
+        "DeviceState": {
+          "device_id": "sensor.outdoor_weather",
+          "attribute": "temperature",
+          "op": "Gt",
+          "value": 35
+        }
       }
     ],
     "actions": [
       {
-        "Parallel": {
-          "actions": [
-            { "Notify": { "channel": "phone",  "title": "High temperature", "message": "Outdoor temp exceeded 35°C" } },
-            { "Notify": { "channel": "email",  "title": "High temperature", "message": "Outdoor temp exceeded 35°C" } }
-          ]
-        }
+        "action": {
+          "Parallel": {
+            "actions": [
+              {
+                "Notify": {
+                  "channel": "phone",
+                  "title": "High temperature",
+                  "message": "Outdoor temp exceeded 35°C"
+                }
+              },
+              {
+                "Notify": {
+                  "channel": "email",
+                  "title": "High temperature",
+                  "message": "Outdoor temp exceeded 35°C"
+                }
+              }
+            ]
+          }
+        },
+        "enabled": true
       }
     ]
   }' | jq
@@ -3719,12 +3919,21 @@ changed.  Use it instead of diffing `previous` vs `current` manually:
 
 ```json
 {
-  "type": "device_state_changed",
-  "timestamp": "2026-03-25T15:04:05Z",
-  "device_id": "yolink_door_01",
-  "previous": { "open": false, "battery_pct": 90 },
-  "current":  { "open": true,  "battery_pct": 90 },
-  "changed":  ["open"]
+  "DeviceStateChanged": {
+    "timestamp": "2026-03-25T15:04:05Z",
+    "device_id": "yolink_door_01",
+    "previous": {
+      "open": false,
+      "battery_pct": 90
+    },
+    "current": {
+      "open": true,
+      "battery_pct": 90
+    },
+    "changed": [
+      "open"
+    ]
+  }
 }
 ```
 
@@ -3732,12 +3941,13 @@ changed.  Use it instead of diffing `previous` vs `current` manually:
 
 ```json
 {
-  "type": "rule_fired",
-  "timestamp": "2026-03-25T15:04:05Z",
-  "rule_id": "3f2d…",
-  "rule_name": "OH-1 door left open alert",
-  "trigger_type": "DeviceStateChanged",
-  "action_count": 1
+  "RuleFired": {
+    "timestamp": "2026-03-25T15:04:05Z",
+    "rule_id": "3f2d…",
+    "rule_name": "OH-1 door left open alert",
+    "trigger_type": "DeviceStateChanged",
+    "action_count": 1
+  }
 }
 ```
 
@@ -4600,24 +4810,45 @@ wake_on_lan                = true
 
 ```json
 {
-  "state":            "playing",
-  "on":               true,
-  "power_mode":       "PowerOn",
-  "source":           "Netflix",
-  "app_id":           "12",
-  "app_name":         "Netflix",
-  "app_type":         "appl",
-  "is_tv_input":      false,
-  "media_position":   38,
-  "media_duration":   6496,
-  "media_is_live":    false,
-  "media_format":     { "container": "hls", "video": "mpeg4_10b" },
-  "available_sources": ["Netflix", "YouTube", "Antenna TV"],
-  "available_apps":    [{ "id": "12", "name": "Netflix", "type": "appl" }],
-  "available_inputs":  [{ "id": "tvinput.hdmi1", "name": "Blu-ray player" }],
-  "model_name":       "Roku Ultra",
-  "is_tv":            false,
-  "device_info":      { "…": "full query/device-info dump" }
+  "state": "playing",
+  "on": true,
+  "power_mode": "PowerOn",
+  "source": "Netflix",
+  "app_id": "12",
+  "app_name": "Netflix",
+  "app_type": "appl",
+  "is_tv_input": false,
+  "media_position": 38,
+  "media_duration": 6496,
+  "media_is_live": false,
+  "media_format": {
+    "container": "hls",
+    "video": "mpeg4_10b"
+  },
+  "available_sources": [
+    "Netflix",
+    "YouTube",
+    "Antenna TV"
+  ],
+  "available_apps": [
+    {
+      "Appl": {
+        "id": "12",
+        "name": "Netflix"
+      }
+    }
+  ],
+  "available_inputs": [
+    {
+      "id": "tvinput.hdmi1",
+      "name": "Blu-ray player"
+    }
+  ],
+  "model_name": "Roku Ultra",
+  "is_tv": false,
+  "device_info": {
+    "…": "full query/device-info dump"
+  }
 }
 ```
 
@@ -7919,7 +8150,11 @@ run_mode = { type = "queued", max_queue = 5 }  # queue up to N, drop if full
 The `Skipped` outcome appears in the rule fire history:
 
 ```json
-{ "type": "skipped", "reason": "single: already in-flight" }
+{
+  "Skipped": {
+    "reason": "single: already in-flight"
+  }
+}
 ```
 
 ---

@@ -1532,12 +1532,10 @@ dependencies = [
  "bcrypt",
  "chrono",
  "getrandom 0.4.2",
- "hc-types",
  "jsonwebtoken",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tracing",
  "uuid",
 ]
 
@@ -1546,7 +1544,6 @@ name = "hc-broker"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "hc-types",
  "rumqttd",
  "tokio",
  "tracing",
@@ -2048,7 +2045,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "uuid",
 ]
 
@@ -2185,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.121"
+version = "0.1.122"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
