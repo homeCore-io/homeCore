@@ -120,29 +120,21 @@ pattern = "tele/{device}/SENSOR"
 
 
 # ---------------------------------------------------------------------------
-# Outbound commands — single relay
+# Outbound commands
 # ---------------------------------------------------------------------------
+# The first entry whose source matches a command is the only one used, so the
+# relay entries come before the general one: `tasmota_{device}/cmd` also
+# matches `tasmota_strip_relay1/cmd`, with device = "strip_relay1".
 
-[[ecosystem.cmd_topics]]
-source    = "homecore/devices/tasmota_{device}/cmd"
-target    = "cmnd/{device}/POWER"
-attribute = "on"                 # extract only "on" from the cmd JSON payload
-
-  [ecosystem.cmd_topics.coerce]
-  on = "bool_to_onoff"           # true → "ON", false → "OFF"
-
-
-# ---------------------------------------------------------------------------
-# Outbound commands — dual relay
-# ---------------------------------------------------------------------------
+# Dual relay
 
 [[ecosystem.cmd_topics]]
 source    = "homecore/devices/tasmota_{device}_relay1/cmd"
 target    = "cmnd/{device}/POWER1"
-attribute = "on"
+attribute = "on"                 # extract only "on" from the cmd JSON payload
 
   [ecosystem.cmd_topics.coerce]
-  on = "bool_to_onoff"
+  on = "bool_to_onoff"           # true → "ON", false → "OFF"
 
 [[ecosystem.cmd_topics]]
 source    = "homecore/devices/tasmota_{device}_relay2/cmd"
@@ -152,26 +144,20 @@ attribute = "on"
   [ecosystem.cmd_topics.coerce]
   on = "bool_to_onoff"
 
-
-# ---------------------------------------------------------------------------
-# Outbound commands — dimmer
-# ---------------------------------------------------------------------------
+# Single relay or dimmer: one Backlog message for the whole command, so
+# {"on": true, "brightness_pct": 80} becomes "POWER ON; Dimmer 80". A plain
+# relay ignores the parts it has no use for.
+#
+# The transform is in custom-transforms.rhai, beside this file; copy both into
+# config/profiles. Without the script these commands are not translated (and
+# homeCore says so at startup). For relays alone, replace this entry with:
+#
+#   source    = "homecore/devices/tasmota_{device}/cmd"
+#   target    = "cmnd/{device}/POWER"
+#   attribute = "on"
+#   coerce    = { on = "bool_to_onoff" }
 
 [[ecosystem.cmd_topics]]
-source = "homecore/devices/tasmota_{device}/cmd"
-target = "cmnd/{device}/Backlog"
-# Tasmota Backlog allows multiple commands in one message:
-# "POWER ON; Dimmer 80; CT 300"
-# This requires a custom Rhai transform rather than simple field mapping.
+source    = "homecore/devices/tasmota_{device}/cmd"
+target    = "cmnd/{device}/Backlog"
 transform = "homecore_cmd_to_tasmota_backlog"
-
-# Rhai transform for dimmer commands:
-# fn homecore_cmd_to_tasmota_backlog(payload) {
-#     let p = parse_json(payload);
-#     let parts = [];
-#     if "on" in p      { parts += if p.on { "POWER ON" } else { "POWER OFF" }; }
-#     if "brightness_pct" in p { parts += "Dimmer " + p.brightness_pct; }
-#     if "color_temp" in p { parts += "CT " + (1000000 / p.color_temp).to_int(); }
-#     parts.join("; ")
-# }
-# Add this function to config/profiles/custom-transforms.rhai

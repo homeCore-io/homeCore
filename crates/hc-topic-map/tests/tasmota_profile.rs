@@ -35,3 +35,62 @@ fn a_dimmer_reply_carries_brightness_and_power() {
     assert_eq!(p["on"], true);
     assert_eq!(p["brightness_pct"], 40);
 }
+
+fn router_with_scripts() -> EcosystemRouter {
+    let dir = "../../config/profiles/examples";
+    let profiles = load_profiles_from_dir(dir).expect("Failed to load example profiles");
+    let scripts = hc_topic_map::loader::load_transforms_from_dir(dir);
+    EcosystemRouter::with_scripts(profiles, &scripts)
+}
+
+/// Every transform an example profile names is in the example script.
+#[test]
+fn the_example_scripts_define_every_transform_the_examples_name() {
+    assert_eq!(
+        router_with_scripts().missing_transforms(),
+        Vec::<String>::new()
+    );
+}
+
+fn command(topic: &str, payload: &str) -> (String, String) {
+    let out = router_with_scripts()
+        .route_outbound(topic, payload.as_bytes())
+        .unwrap()
+        .unwrap_or_else(|| panic!("no cmd entry for {topic}"));
+    assert_eq!(out.len(), 1);
+    (
+        out[0].target_topic.clone(),
+        String::from_utf8(out[0].payload.clone()).unwrap(),
+    )
+}
+
+/// A dimmer command goes out as one Backlog. It used to sit behind a POWER
+/// entry with the same source, which always matched first.
+#[test]
+fn a_dimmer_command_is_one_backlog() {
+    let (topic, payload) = command(
+        "homecore/devices/tasmota_lamp/cmd",
+        r#"{"on":true,"brightness_pct":80,"color_temp":3000}"#,
+    );
+    assert_eq!(topic, "cmnd/lamp/Backlog");
+    assert_eq!(payload, "POWER ON; Dimmer 80; CT 333");
+}
+
+#[test]
+fn a_plain_off_is_a_backlog_of_one() {
+    let (topic, payload) = command("homecore/devices/tasmota_plug/cmd", r#"{"on":false}"#);
+    assert_eq!(topic, "cmnd/plug/Backlog");
+    assert_eq!(payload, "POWER OFF");
+}
+
+/// The general entry also matches `tasmota_strip_relay1`, so the relay
+/// entries must come first; they used to send `cmnd/strip_relay1/POWER`.
+#[test]
+fn a_relay_command_reaches_its_relay() {
+    let (topic, payload) = command(
+        "homecore/devices/tasmota_strip_relay1/cmd",
+        r#"{"on":true}"#,
+    );
+    assert_eq!(topic, "cmnd/strip/POWER1");
+    assert_eq!(payload, "ON");
+}
