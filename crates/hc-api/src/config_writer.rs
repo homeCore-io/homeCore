@@ -105,6 +105,15 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
             })?;
             table[key.as_str()] = item;
         }
+        // A section a patch leaves empty goes, rather than staying as a bare
+        // header: it means what no section means, every field its default,
+        // except where an empty one doesn't parse at all. `[location]` needs
+        // its latitude and longitude, so clearing `temperature_unit` from a
+        // file with no `[location]` used to leave one that stopped the next
+        // start.
+        if table.is_empty() {
+            remove_section(&mut doc, section_path);
+        }
     }
 
     Ok(doc.to_string())
@@ -244,6 +253,24 @@ fn same_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
 /// Walk a dotted section path (e.g. "auth.admin_uds") and return a
 /// mutable handle to the table at the leaf. Creates intermediate
 /// tables if missing.
+/// Take the table at `section_path` out of its parent, if it is there.
+fn remove_section(doc: &mut toml_edit::DocumentMut, section_path: &str) {
+    let (parent, leaf) = match section_path.rsplit_once('.') {
+        Some((p, l)) => (Some(p), l),
+        None => (None, section_path),
+    };
+    let mut current: &mut toml_edit::Table = doc.as_table_mut();
+    if let Some(p) = parent {
+        for seg in p.split('.') {
+            match current.get_mut(seg) {
+                Some(toml_edit::Item::Table(t)) => current = t,
+                _ => return,
+            }
+        }
+    }
+    current.remove(leaf);
+}
+
 fn walk_to_table_mut<'a>(
     doc: &'a mut toml_edit::DocumentMut,
     section_path: &str,
@@ -352,6 +379,44 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clearing_a_key_from_a_section_that_is_not_there_adds_no_section() {
+        let before = "[server]\nport = 8080\n";
+        let after = super::apply_section_patch(
+            before,
+            &serde_json::json!({ "location": { "temperature_unit": null } }),
+        )
+        .unwrap();
+        assert!(!after.contains("[location]"), "{after}");
+        // And it still parses as a config.
+        let _: toml::Value = toml::from_str(&after).unwrap();
+    }
+
+    #[test]
+    fn clearing_the_last_key_removes_the_section_but_keeps_one_with_more() {
+        let only_unit = "[location]\ntemperature_unit = \"°F\"\n";
+        let patch = serde_json::json!({ "location": { "temperature_unit": null } });
+        let after = super::apply_section_patch(only_unit, &patch).unwrap();
+        assert!(!after.contains("[location]"), "{after}");
+
+        let with_place =
+            "[location]\nlatitude = 38.9\nlongitude = -77.0\ntemperature_unit = \"°F\"\n";
+        let after = super::apply_section_patch(with_place, &patch).unwrap();
+        let v: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(v["location"]["latitude"].as_float(), Some(38.9));
+        assert!(v["location"].get("temperature_unit").is_none());
+    }
+
+    #[test]
+    fn a_nested_section_left_empty_leaves_no_empty_parent_header() {
+        let after = super::apply_section_patch(
+            "[server]\nport = 8080\n",
+            &serde_json::json!({ "auth.admin_uds": { "enabled": null } }),
+        )
+        .unwrap();
+        assert!(!after.contains("[auth"), "{after}");
+    }
+
     use super::*;
 
     fn make_temp_config(content: &str) -> tempfile::NamedTempFile {
