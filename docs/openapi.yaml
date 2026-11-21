@@ -841,9 +841,28 @@ paths:
               brightness_pct: 70
       responses:
         "202":
-          description: Command accepted and published to MQTT
+          description: |
+            Command accepted and published to MQTT. `correlation_id` is the id
+            the command, the state change it causes and anything that follows
+            from it carry in the event log (`GET /events`), so the caller can
+            follow it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [accepted]
+                  correlation_id:
+                    type: string
+                    format: uuid
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: No device with this id. Nothing was published.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /devices/{id}/media/art:
     get:
