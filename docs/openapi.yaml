@@ -84,6 +84,7 @@ paths:
   # ---------------------------------------------------------------------------
   /auth/login:
     post:
+      security: []
       operationId: login
       summary: Log in and receive a JWT
       description: Public endpoint — no token required.
@@ -139,9 +140,8 @@ paths:
                     user_agent:
                       type: string
                     started_at:
-                      type: string
+                      type: [string, "null"]
                       format: date-time
-                      nullable: true
                     last_active:
                       type: string
                       format: date-time
@@ -561,8 +561,7 @@ paths:
                   items:
                     type: string
                 area:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                   description: Area to assign to every listed device; `null` clears the area
             example:
               ids:
@@ -729,17 +728,13 @@ paths:
                 name:
                   type: string
                 area:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                 canonical_name:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                 status_icon:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                 security:
-                  type: boolean
-                  nullable: true
+                  type: [boolean, "null"]
                   description: |
                     Whether the device counts toward the house's security.
                     `true` counts it even if its type would not; `false`
@@ -2680,6 +2675,8 @@ paths:
 
   /events/stream:
     get:
+      security:
+        - queryToken: []
       operationId: streamEvents
       summary: Live WebSocket event stream
       tags: [events]
@@ -3451,6 +3448,7 @@ paths:
   # ---------------------------------------------------------------------------
   /health:
     get:
+      security: []
       operationId: getHealth
       summary: Liveness probe — no auth required
       tags: [system]
@@ -3628,6 +3626,7 @@ paths:
   # ---------------------------------------------------------------------------
   /auth/refresh:
     post:
+      security: []
       operationId: refreshToken
       summary: Exchange a refresh token for a new access + refresh pair
       description: |
@@ -4635,20 +4634,15 @@ paths:
                       description: Context captured from the triggering event. Optional members are omitted when unset.
                       properties:
                         device_id:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                         attribute:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                         value:
                           description: Any JSON value
-                          nullable: true
                         prev_value:
                           description: Any JSON value
-                          nullable: true
                         event_type:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                         change_kind:
                           type: string
                           enum: [homecore, physical, external, unknown]
@@ -5200,8 +5194,7 @@ paths:
                               name:
                                 type: string
                               device_type:
-                                type: string
-                                nullable: true
+                                type: [string, "null"]
                               last_seen:
                                 type: string
                                 format: date-time
@@ -6019,8 +6012,7 @@ paths:
               properties:
                 name: { type: string }
                 max_plugins:
-                  type: integer
-                  nullable: true
+                  type: [integer, "null"]
       responses:
         "200":
           description: The runtime as it is now
@@ -6234,8 +6226,7 @@ paths:
                             plugin.
                         placed_at: { type: string, format: date-time }
                         interpreter:
-                          type: object
-                          nullable: true
+                          type: [object, "null"]
                           description: |
                             The interpreter to make the plugin's environment
                             from, chosen from the signed index. Fetch it from
@@ -6288,6 +6279,8 @@ paths:
 
   /plugin-runtimes/interpreters:
     get:
+      security:
+        - bearerAuth: []
       operationId: listPluginRuntimeInterpreters
       summary: The interpreters hosted plugins run on, and updates waiting
       description: |
@@ -6315,7 +6308,7 @@ paths:
                         versions:
                           type: array
                           items: { type: string }
-                        update: { type: string, nullable: true, example: 3.13.19 }
+                        update: { type: [string, "null"], example: 3.13.19 }
                         eol: { type: boolean }
                         plugins:
                           type: array
@@ -6327,6 +6320,8 @@ paths:
 
   /plugin-runtimes/{id}/interpreters/update:
     post:
+      security:
+        - bearerAuth: []
       operationId: updatePluginRuntimeInterpreter
       summary: Move one series on one runtime to its newest patch
       description: |
@@ -6651,16 +6646,13 @@ paths:
                       type: integer
                       description: Events whose start is in the future
                     source_url:
-                      type: string
-                      nullable: true
+                      type: [string, "null"]
                       description: Set only when the calendar was fetched via `POST /calendars/fetch`
                     fetched_at:
-                      type: string
+                      type: [string, "null"]
                       format: date-time
-                      nullable: true
                     refresh_hours:
-                      type: integer
-                      nullable: true
+                      type: [integer, "null"]
                       description: |
                         How often a fetched calendar is fetched again, in hours; null
                         when it isn't (uploaded, or fetched once). Added in 0.1.80.
@@ -6697,12 +6689,10 @@ paths:
                   type: string
                   description: HTTP(S) URL of the `.ics` file
                 name:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                   description: Calendar id / filename stem.  Derived by the store when omitted.
                 refresh_hours:
-                  type: integer
-                  nullable: true
+                  type: [integer, "null"]
                   description: Auto-refresh interval persisted to the `.meta.json` sidecar
       responses:
         "200":
@@ -6769,8 +6759,7 @@ paths:
                   type: string
                   description: Full ICS file text (must contain `BEGIN:VCALENDAR`)
                 name:
-                  type: string
-                  nullable: true
+                  type: [string, "null"]
                   description: Calendar id / filename stem.  Defaults to `uploaded_calendar`.
       responses:
         "200":
@@ -7217,12 +7206,10 @@ paths:
                           type: string
                           enum: [solar, manual]
                         on_event:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                           description: Solar-only sun event that turns the mode on
                         off_event:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                           description: Solar-only sun event that turns the mode off
                         on_offset_minutes:
                           type: integer
@@ -7233,8 +7220,7 @@ paths:
                         - $ref: "#/components/schemas/DeviceState"
                         - type: "null"
                     definition:
-                      nullable: true
-                      type: object
+                      type: [object, "null"]
                       required: [mode_id, criteria]
                       properties:
                         mode_id:
@@ -7312,8 +7298,7 @@ paths:
                   type: string
                   enum: [solar, manual]
                 criteria_definition:
-                  nullable: true
-                  type: object
+                  type: [object, "null"]
                   required: [on_condition]
                   properties:
                     on_condition:
@@ -7428,11 +7413,9 @@ paths:
                         type: string
                         enum: [solar, manual]
                       on_event:
-                        type: string
-                        nullable: true
+                        type: [string, "null"]
                       off_event:
-                        type: string
-                        nullable: true
+                        type: [string, "null"]
                       on_offset_minutes:
                         type: integer
                       off_offset_minutes:
@@ -7442,8 +7425,7 @@ paths:
                       - $ref: "#/components/schemas/DeviceState"
                       - type: "null"
                   definition:
-                    nullable: true
-                    type: object
+                    type: [object, "null"]
                     required: [mode_id, criteria]
                     properties:
                       mode_id:
@@ -7925,6 +7907,8 @@ paths:
 
   /logs/stream:
     get:
+      security:
+        - queryToken: []
       operationId: streamLogs
       summary: Live WebSocket log stream
       tags: [system]
@@ -7994,6 +7978,7 @@ paths:
   # ---------------------------------------------------------------------------
   /metrics:
     get:
+      security: []
       operationId: getMetrics
       summary: Prometheus metrics exposition — IP-gated, no JWT
       tags: [system]
@@ -8084,8 +8069,7 @@ paths:
                           type: string
                           enum: [events_stream, logs_stream]
                         client_id:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                           description: Per-tab fingerprint from `?client_id=`; null when the caller did not send one
                         ip:
                           type: string
@@ -8094,8 +8078,7 @@ paths:
                           type: string
                           description: Authenticated subject, or `whitelist` for IP-whitelist callers
                         user_agent:
-                          type: string
-                          nullable: true
+                          type: [string, "null"]
                         connected_at:
                           type: string
                           format: date-time
@@ -8223,7 +8206,7 @@ paths:
                             name: { type: string }
                         device_id: { type: string }
                         plugin_id: { type: string }
-                        name: { type: string, description: The attribute, action or key }
+                        name: { type: string, description: "The attribute, action or key" }
                         message: { type: string }
                         instead: { type: string, description: What to use instead }
                   conversions:
@@ -8321,6 +8304,7 @@ paths:
 
   /system/versions:
     get:
+      security: []
       operationId: getSystemVersions
       summary: Component bill-of-materials — no auth required
       description: |
@@ -8423,9 +8407,8 @@ paths:
                     type: string
                     description: Full file contents
                   parsed:
-                    type: object
+                    type: [object, "null"]
                     additionalProperties: true
-                    nullable: true
                     description: TOML parsed to JSON; null when the file does not parse
                   path:
                     type: string
@@ -8654,8 +8637,7 @@ paths:
                     type: number
                     description: Recovery fires at `threshold_pct + recover_band_pct` (default 5)
                   notify_channel:
-                    type: string
-                    nullable: true
+                    type: [string, "null"]
                     description: hc-notify channel fired on each low edge; null disables the shortcut
                   notify_on_recovered:
                     type: boolean
@@ -9010,6 +8992,13 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    queryToken:
+      type: apiKey
+      in: query
+      name: token
+      description: |
+        The same JWT or API key, as `?token=` — for WebSocket streams, which a
+        browser cannot send an Authorization header to.
 
   parameters:
     UserId:
@@ -9371,20 +9360,17 @@ components:
           type: string
           description: Plugin-owned internal identifier used for MQTT topics and execution
         canonical_name:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: Stable, homeCore-managed identifier intended for rule authoring and logs
         status_icon:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: Optional UI-facing status icon override for device surfaces
         name:
           type: string
         plugin_id:
           type: string
         device_type:
-          type: string
-          nullable: true
+          type: [string, "null"]
         area:
           type: string
           description: |
@@ -9552,9 +9538,8 @@ components:
           type: string
           format: date-time
         last_used_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         revoked:
           type: boolean
 
@@ -9833,26 +9818,22 @@ components:
             `below`, `for_minutes` counts from when homeCore first saw it so —
             a reading changes while staying over a line.
         notify:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: A notification channel (or `all`) told when one of its alerts is raised.
         state_label:
           type: string
           description: The state in the device's words, for the alert's message.
           example: Open
         after:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: From this time of day, `HH:MM` local.
           example: "22:00"
         until:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: Until this time of day, `HH:MM` local; earlier than `after` spans midnight.
           example: "06:00"
         for_minutes:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           minimum: 1
           description: Only once the state has lasted this long.
         severity:
@@ -9936,7 +9917,7 @@ components:
         actions:
           type: array
           items:
-            $ref: "#/components/schemas/Action"
+            $ref: "#/components/schemas/RuleAction"
 
     RuleCreate:
       type: object
@@ -9968,14 +9949,16 @@ components:
         actions:
           type: array
           items:
-            $ref: "#/components/schemas/Action"
+            $ref: "#/components/schemas/RuleAction"
 
     Trigger:
-      type: object
       description: |
-        Discriminated union on the `type` field.
+        Encoded with the variant's name as the one key, holding its fields:
+        `{"DeviceStateChanged": {"device": "kitchen.lamp", "attribute": "on"}}`.
+        A variant with no fields is its name alone, as a string:
+        `"ManualTrigger"`. A `type` field is refused.
 
-        | `type` | Additional fields |
+        | Variant | Fields |
         |---|---|
         | `DeviceStateChanged` | `device` or `device_id` (string), `devices` or `device_ids` (array, optional), `attribute` (string, optional) |
         | `MqttMessage` | `topic_pattern` (string, supports `+` and `#`) |
@@ -9990,100 +9973,81 @@ components:
         - a `canonical_name` such as `living_room.floor_lamp`
         - a unique display name such as `Kitchen Speaker`
         - a raw `device_id` for advanced/manual cases
-      required: [type]
-      properties:
-        type:
-          type: string
-          enum: [DeviceStateChanged, MqttMessage, TimeOfDay, SunEvent, WebhookReceived, ManualTrigger]
-        device:
-          type: string
-        devices:
-          type: array
-          items:
-            type: string
-        device_id:
-          type: string
-          description: Backward-compatible alias for `device`
-        device_ids:
-          type: array
-          items:
-            type: string
-          description: Backward-compatible alias for `devices`
-        attribute:
-          type: string
-        topic_pattern:
-          type: string
-        time:
-          type: string
-          description: "HH:MM format"
-        days:
-          type: array
-          items:
-            type: string
-            enum: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]
-        event:
-          type: string
-          enum: [Sunrise, Sunset, SolarNoon, CivilDawn, CivilDusk]
-        offset_minutes:
-          type: integer
-        path:
-          type: string
-      examples:
+      oneOf:
+        - type: string
+          enum: [ManualTrigger]
+          description: A variant with no fields, by its name alone
+        - type: object
+          description: One key, the variant's name, holding its fields (see the table)
+          minProperties: 1
+          maxProperties: 1
+          additionalProperties:
+            type: object
+            additionalProperties: true
+      example:
         DeviceStateChanged:
-          value:
-            type: DeviceStateChanged
-            device: living_room.floor_lamp
-            devices: [hall.floor_lamp]
-            attribute: on
-        WebhookReceived:
-          value:
-            type: WebhookReceived
-            path: my-hook
-        TimeOfDay:
-          value:
-            type: TimeOfDay
-            time: "18:30"
-            days: [Monday, Tuesday, Wednesday, Thursday, Friday]
+          device: living_room.floor_lamp
+          devices: [hall.floor_lamp]
+          attribute: on
 
     Condition:
-      type: object
       description: |
-        Discriminated union on the `type` field.  All conditions AND together.
+        Encoded with the variant's name as the one key, holding its fields:
+        `{"DeviceState": {"device": "kitchen.lamp", "attribute": "on", "op": "Eq", "value": true}}`.
+        A `type` field is refused. All of a rule's conditions must hold.
 
-        | `type` | Additional fields |
+        | Variant | Fields |
         |---|---|
         | `DeviceState` | `device` or `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
         | `TimeWindow` | `start` (HH:MM), `end` (HH:MM) |
         | `ScriptExpression` | `script` (Rhai expression returning bool) |
-      required: [type]
+        | `Not` | `condition` |
+        | `And`, `Or`, `Xor` | `conditions` (array) |
+
+        Every variant and its fields, with the words a client shows for each,
+        are served by `GET /automations/vocabulary`.
+      type: object
+      minProperties: 1
+      maxProperties: 1
+      additionalProperties:
+        type: object
+        additionalProperties: true
+      example:
+        DeviceState:
+          device: kitchen.lamp
+          attribute: on
+          op: Eq
+          value: true
+
+    RuleAction:
+      description: |
+        One step of a rule's `actions`: the action, and whether it runs. An
+        `enabled: false` step is skipped and recorded as skipped. Nested
+        action lists (`Parallel`, `Conditional`, `RepeatUntil`) hold bare
+        actions, without this wrapper.
+      type: object
+      required: [action]
       properties:
-        type:
-          type: string
-          enum: [DeviceState, TimeWindow, ScriptExpression]
-        device:
-          type: string
-        device_id:
-          type: string
-          description: Backward-compatible alias for `device`
-        attribute:
-          type: string
-        op:
-          type: string
-          enum: [Eq, Ne, Gt, Gte, Lt, Lte]
-        value: {}
-        start:
-          type: string
-        end:
-          type: string
-        script:
-          type: string
+        action:
+          $ref: "#/components/schemas/Action"
+        enabled:
+          type: boolean
+          default: true
+      example:
+        action:
+          SetDeviceState:
+            device: kitchen.lamp
+            state: { on: true }
+        enabled: true
 
     Action:
-      type: object
       description: |
-        Discriminated union on the `type` field.  Actions run sequentially by default.
+        Encoded with the variant's name as the one key, holding its fields:
+        `{"SetDeviceState": {"device": "kitchen.lamp", "state": {"on": true}}}`.
+        A `type` field is refused. In a rule's `actions` each step is wrapped
+        in a `RuleAction`.
 
-        | `type` | Key fields |
+        | Variant | Fields |
         |---|---|
         | `SetDeviceState` | `device` or `device_id`, `state` (object) |
         | `PublishMqtt` | `topic`, `payload` (string), `retain` (bool) |
@@ -10100,59 +10064,14 @@ components:
 
         For device-targeting actions, prefer `device` in authored rules so the
         automation remains readable and stable across plugin-specific ID
-        changes.
-      required: [type]
-      properties:
-        type:
-          type: string
-          enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil, RoomOn, RoomOff]
-        device:
-          type: string
-        device_id:
-          type: string
-          description: Backward-compatible alias for `device`
-        state:
-          type: object
-          additionalProperties: true
-        topic:
-          type: string
-        payload:
-          type: string
-        retain:
-          type: boolean
-        url:
-          type: string
-        method:
-          type: string
-          enum: [GET, POST, PUT, PATCH, DELETE]
-        body:
-          type: object
-          additionalProperties: true
-        event_type:
-          type: string
-        channel:
-          type: string
-        message:
-          type: string
-        script:
-          type: string
-        condition:
-          type: string
-          description: Rhai expression returning bool (used by RepeatUntil)
-        duration_ms:
-          type: integer
-        max_iterations:
-          type: integer
-          default: 100
-        interval_ms:
-          type: integer
-        room:
-          type: string
-          description: The room for `RoomOn` and `RoomOff`, by id, slug, alias or name
-        actions:
-          type: array
-          items:
-            $ref: "#/components/schemas/Action"
+        changes. Every variant and its fields are served by
+        `GET /automations/vocabulary`.
+      type: object
+      minProperties: 1
+      maxProperties: 1
+      additionalProperties:
+        type: object
+        additionalProperties: true
 
     AutomationTestResult:
       type: object
