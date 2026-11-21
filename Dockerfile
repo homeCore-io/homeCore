@@ -41,7 +41,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — Build
 # -----------------------------------------------------------------------------
-FROM rust:1.99-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS builder
+FROM rust:1.100-alpine3.24@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS builder
 
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev pkgconfig
 
@@ -49,12 +49,16 @@ WORKDIR /build
 
 # Fetch dependencies before copying source for better layer caching.
 #
-# `plugins/plugin-sdk-rs/` and `plugins/examples/` used to be copied here too.
-# Neither has existed in this repo for some time — the SDK is its own repo and
-# the example plugins were removed — so those lines failed the build outright.
+# Every workspace member has to be here for cargo to load the workspace, even
+# the ones this image doesn't build: the SDK and the plugins became members
+# with the monorepo, and without them the build stopped at "failed to load
+# manifest". `docker/Dockerfile.core` is the one releases use.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 COPY homecore/ ./homecore/
+COPY sdk/ ./sdk/
+COPY runtime-host/ ./runtime-host/
+COPY plugins/ ./plugins/
 
 RUN cargo build --release --bin homecore --bin hc-cli
 

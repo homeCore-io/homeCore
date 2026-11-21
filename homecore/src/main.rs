@@ -15,7 +15,10 @@ use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::NotificationService;
 use hc_state::StateStore;
-use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, EcosystemRouter};
+use hc_topic_map::{
+    loader::{load_profiles_from_dir, load_transforms_from_dir},
+    DeviceTypeRegistry, EcosystemRouter,
+};
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -797,17 +800,19 @@ async fn main() -> Result<()> {
 
     // Load ecosystem profiles and build the router.  Done before spawning the
     // MQTT client so add_subscription("#") runs first.
+    // Transforms are every `*.rhai` file beside the profiles; a script that
+    // doesn't compile is skipped, as a profile that doesn't parse is.
     match load_profiles_from_dir(&config.profiles.dir) {
-        Ok(profiles) if !profiles.is_empty() => match EcosystemRouter::new(profiles, None) {
-            Ok(router) => {
-                mqtt_client.add_subscription("#");
-                info!("Ecosystem router ready; subscribed to all topics (#)");
-                core = core.with_router(router);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Ecosystem router init failed; running without it")
-            }
-        },
+        Ok(profiles) if !profiles.is_empty() => {
+            let scripts = load_transforms_from_dir(&config.profiles.dir);
+            let router = EcosystemRouter::with_scripts(profiles, &scripts);
+            mqtt_client.add_subscription("#");
+            info!(
+                scripts = scripts.len(),
+                "Ecosystem router ready; subscribed to all topics (#)"
+            );
+            core = core.with_router(router);
+        }
         Ok(_) => info!(
             "No ecosystem profiles found in {}; running without router",
             config.profiles.dir

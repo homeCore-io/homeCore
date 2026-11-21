@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use rhai::{Engine, Scope, AST};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -74,8 +74,101 @@ pub struct EcosystemRouter {
 
 impl EcosystemRouter {
     /// Build a router from a list of parsed ecosystem profiles.
-    /// `rhai_source` may contain custom transform functions.
+    /// `rhai_source` may contain custom transform functions; a compile error
+    /// in it fails the build.
     pub fn new(profiles: Vec<EcosystemProfile>, rhai_source: Option<&str>) -> Result<Self> {
+        let mut router = Self::build(profiles)?;
+        if let Some(src) = rhai_source {
+            router.rhai_ast = Some(
+                router
+                    .rhai_engine
+                    .compile(src)
+                    .map_err(|e| anyhow!("Rhai compile error: {e}"))?,
+            );
+        }
+        Ok(router)
+    }
+
+    /// Build a router with the transform scripts from a profiles directory
+    /// (see [`crate::loader::load_transforms_from_dir`]), as `(file name, source)`.
+    ///
+    /// Each script compiles on its own. One that doesn't is logged and left
+    /// out, as a profile that doesn't parse is, so a typo in one script costs
+    /// only the transforms it holds. A function defined in two scripts is
+    /// taken from the later one, with a warning. A topic whose `transform`
+    /// names no loaded function is warned about here, once, rather than on
+    /// every message it fails.
+    pub fn with_scripts(profiles: Vec<EcosystemProfile>, scripts: &[(String, String)]) -> Self {
+        let mut router = Self::build(profiles).expect("building a router without Rhai cannot fail");
+
+        let mut merged: Option<AST> = None;
+        let mut defined_in: HashMap<String, String> = HashMap::new();
+        for (file, src) in scripts {
+            let ast = match router.rhai_engine.compile(src) {
+                Ok(ast) => ast,
+                Err(e) => {
+                    warn!(file = %file, error = %e, "Rhai transform script does not compile; skipping");
+                    continue;
+                }
+            };
+            for f in ast.iter_functions() {
+                if let Some(earlier) = defined_in.insert(f.name.to_string(), file.clone()) {
+                    if earlier != *file {
+                        warn!(
+                            function = f.name,
+                            earlier = %earlier,
+                            file = %file,
+                            "Rhai function defined in two scripts; using the later one"
+                        );
+                    }
+                }
+            }
+            info!(file = %file, functions = ast.iter_functions().count(), "Loaded Rhai transforms");
+            merged = Some(match merged {
+                Some(m) => m.merge(&ast),
+                None => ast,
+            });
+        }
+        router.rhai_ast = merged;
+
+        for name in router.missing_transforms() {
+            warn!(
+                transform = %name,
+                "A profile's transform names no function in the loaded .rhai scripts; \
+                 its messages will not be translated"
+            );
+        }
+        router
+    }
+
+    /// Transform names used by a topic that no loaded script defines with
+    /// one parameter, sorted.
+    pub fn missing_transforms(&self) -> Vec<String> {
+        let defined: std::collections::HashSet<&str> = self
+            .rhai_ast
+            .iter()
+            .flat_map(|ast| ast.iter_functions())
+            .filter(|f| f.params.len() == 1)
+            .map(|f| f.name)
+            .collect();
+        let mut missing: Vec<String> = self
+            .state_entries
+            .iter()
+            .filter_map(|e| e.config.transform.as_deref())
+            .chain(
+                self.cmd_entries
+                    .iter()
+                    .filter_map(|e| e.config.transform.as_deref()),
+            )
+            .filter(|name| !defined.contains(name))
+            .map(str::to_string)
+            .collect();
+        missing.sort();
+        missing.dedup();
+        missing
+    }
+
+    fn build(profiles: Vec<EcosystemProfile>) -> Result<Self> {
         let mut state_entries = Vec::new();
         let mut availability_entries = Vec::new();
         let mut cmd_entries = Vec::new();
@@ -108,22 +201,16 @@ impl EcosystemRouter {
         let mut rhai_engine = Engine::new();
         rhai_engine.set_max_operations(100_000);
         rhai_engine.set_max_call_levels(16);
-
-        let rhai_ast = match rhai_source {
-            Some(src) => Some(
-                rhai_engine
-                    .compile(src)
-                    .map_err(|e| anyhow!("Rhai compile error: {e}"))?,
-            ),
-            None => None,
-        };
+        // A script's print() and debug() go to the log, not to stdout.
+        rhai_engine.on_print(|s| info!(target: "hc_topic_map::rhai", "{s}"));
+        rhai_engine.on_debug(|s, _src, pos| debug!(target: "hc_topic_map::rhai", %pos, "{s}"));
 
         Ok(Self {
             state_entries,
             availability_entries,
             cmd_entries,
             rhai_engine,
-            rhai_ast,
+            rhai_ast: None,
         })
     }
 
@@ -382,8 +469,32 @@ impl EcosystemRouter {
             .rhai_engine
             .call_fn(&mut Scope::new(), ast, fn_name, (payload_str,))
             .map_err(|e| anyhow!("Rhai '{fn_name}': {e}"))?;
-        Ok(result.to_string().into_bytes())
+        transform_output(fn_name, result)
     }
+}
+
+/// The payload a transform's return value stands for.
+///
+/// A string is the payload as it is. A map is JSON, which is what a state
+/// topic parses next and what most devices take; its own display form
+/// (`#{"a": 1}`) is neither. A number or bool is its text. Anything else,
+/// nothing (`()`) included, is a mistake in the script, named here rather than
+/// published.
+fn transform_output(fn_name: &str, result: rhai::Dynamic) -> Result<Vec<u8>> {
+    if result.is_string() {
+        return Ok(result.into_string().unwrap_or_default().into_bytes());
+    }
+    if result.is_map() {
+        let map = result.cast::<rhai::Map>();
+        return Ok(rhai::format_map_as_json(&map).into_bytes());
+    }
+    if result.is_int() || result.is_float() || result.is_bool() {
+        return Ok(result.to_string().into_bytes());
+    }
+    Err(anyhow!(
+        "Rhai '{fn_name}' returned {}; return a string or a map",
+        result.type_name()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -913,5 +1024,108 @@ attribute = "on"
         assert_eq!(door["open"], true);
         let door = inbound(&shelly, "shellies/dw1/sensor/state", b"closed");
         assert_eq!(door["open"], false);
+    }
+
+    // ── Rhai transforms ────────────────────────────────────────────────────
+
+    const TRANSFORM_PROFILE: &str = r#"
+[ecosystem]
+name = "rhai-test"
+prefix = "rt"
+
+[[ecosystem.state_topics]]
+pattern = "rt/{device}/raw"
+transform = "raw_to_state"
+
+[[ecosystem.cmd_topics]]
+source = "homecore/devices/rt_{device}/cmd"
+target = "rt/{device}/set"
+transform = "cmd_to_native"
+"#;
+
+    fn scripts(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(n, s)| (n.to_string(), s.to_string()))
+            .collect()
+    }
+
+    fn transform_router(list: &[(&str, &str)]) -> EcosystemRouter {
+        EcosystemRouter::with_scripts(
+            vec![load_profile_str(TRANSFORM_PROFILE).unwrap()],
+            &scripts(list),
+        )
+    }
+
+    fn state_of(router: &EcosystemRouter, topic: &str, payload: &[u8]) -> Value {
+        match router.route_inbound(topic, payload).unwrap() {
+            Some(InboundResult::State { payload, .. }) => payload,
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transform_returning_a_map_publishes_json() {
+        let r = transform_router(&[(
+            "a.rhai",
+            r#"fn raw_to_state(p) { #{ on: p == "ON", note: "x" } }"#,
+        )]);
+        let s = state_of(&r, "rt/lamp/raw", b"ON");
+        assert_eq!(s["on"], true);
+        assert_eq!(s["note"], "x");
+    }
+
+    #[test]
+    fn a_transform_returning_a_string_publishes_it_as_it_is() {
+        let r = transform_router(&[(
+            "a.rhai",
+            r#"fn cmd_to_native(p) { "LEVEL " + parse_json(p).level }"#,
+        )]);
+        let out = r
+            .route_outbound("homecore/devices/rt_lamp/cmd", br#"{"level":7}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out[0].target_topic, "rt/lamp/set");
+        assert_eq!(out[0].payload, b"LEVEL 7");
+    }
+
+    #[test]
+    fn a_transform_returning_nothing_is_an_error_not_a_payload() {
+        let r = transform_router(&[("a.rhai", "fn cmd_to_native(p) { }")]);
+        let err = r
+            .route_outbound("homecore/devices/rt_lamp/cmd", b"{}")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("return a string or a map"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_script_that_does_not_compile_costs_only_its_own_functions() {
+        let r = transform_router(&[
+            ("a.rhai", r#"fn raw_to_state(p) { #{ on: true } }"#),
+            ("b.rhai", "fn cmd_to_native(p) { this is not rhai"),
+        ]);
+        assert_eq!(state_of(&r, "rt/lamp/raw", b"x")["on"], true);
+        assert_eq!(r.missing_transforms(), vec!["cmd_to_native".to_string()]);
+    }
+
+    #[test]
+    fn the_later_script_wins_a_function_both_define() {
+        let r = transform_router(&[
+            ("a.rhai", r#"fn raw_to_state(p) { #{ from: "a" } }"#),
+            ("b.rhai", r#"fn raw_to_state(p) { #{ from: "b" } }"#),
+        ]);
+        assert_eq!(state_of(&r, "rt/lamp/raw", b"x")["from"], "b");
+    }
+
+    #[test]
+    fn a_transform_with_no_script_is_named_as_missing() {
+        let r = transform_router(&[]);
+        assert_eq!(
+            r.missing_transforms(),
+            vec!["cmd_to_native".to_string(), "raw_to_state".to_string()]
+        );
+        assert!(r.route_inbound("rt/lamp/raw", b"x").is_err());
     }
 }

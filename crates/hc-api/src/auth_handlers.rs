@@ -1317,6 +1317,15 @@ mod people_tests {
             store.create_user(&u).await.unwrap();
             people.push(u);
         }
+        // A device to command: homeCore refuses a command to one it doesn't know.
+        store
+            .upsert_device(&hc_types::device::DeviceState::new(
+                "lamp",
+                "Lamp",
+                "plugin.test",
+            ))
+            .await
+            .unwrap();
         const SECRET: &[u8] = b"people-test-secret-32-bytes-min!!";
         let jwt = hc_auth::JwtService::new_hs256(SECRET, 24);
         let state = crate::AppState::new(crate::AppStateParams::new(

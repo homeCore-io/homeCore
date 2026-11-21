@@ -644,9 +644,30 @@ pub async fn command_device(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    // A command to a device homeCore doesn't know went out on MQTT anyway and
+    // answered "accepted", so a mistyped id looked like it worked. The spec
+    // has always said 404.
+    match s.store.get_device(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("no device {id}") })),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        }
+    }
+    // The id the command, the state change it causes and anything that
+    // follows from it carry in the event log, so a caller can follow it.
+    let correlation_id = Uuid::new_v4().to_string();
     let change = DeviceChange::homecore("api")
         .with_actor(Some(claims.uid), Some(claims.sub))
-        .with_correlation_id(Some(Uuid::new_v4().to_string()));
+        .with_correlation_id(Some(correlation_id.clone()));
     if let Err(e) = publish_device_command(&s, &id, body, change).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -654,7 +675,10 @@ pub async fn command_device(
         );
     }
 
-    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "accepted", "correlation_id": correlation_id })),
+    )
 }
 
 pub(crate) async fn publish_device_command(
@@ -2805,10 +2829,8 @@ pub async fn list_automations(
                             return false;
                         }
                     }
-                    if params.stale == Some(true) && r.error.is_none() {
-                        return false;
-                    }
-                    true
+                    // `stale=true` keeps only the rules that failed to load.
+                    params.stale != Some(true) || r.error.is_some()
                 })
                 .cloned()
                 .collect();
@@ -10083,5 +10105,95 @@ mod temperature_unit_tests {
         let written = std::fs::read_to_string(&config).unwrap();
         assert!(!written.contains("temperature_unit"), "{written}");
         hc_core::household::set_temperature_unit(None);
+    }
+}
+
+#[cfg(test)]
+mod command_device_tests {
+    //! `PATCH /devices/{id}/state`: a known device answers 202 with the
+    //! correlation id its events carry; an unknown one answers 404.
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use hc_auth::{Role, User};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn a_command_says_what_to_follow_and_an_unknown_device_is_404() {
+        let base = std::env::temp_dir().join(format!("hc_api_cmd_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let store = hc_state::StateStore::open(
+            &base.join("state.redb").to_string_lossy(),
+            &base.join("history.sqlite").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let u = User {
+            id: Uuid::new_v4(),
+            username: "ada".into(),
+            password_hash: hc_auth::hash_pin("correct horse").unwrap(),
+            role: Role::Admin,
+            created_at: chrono::Utc::now(),
+            token_version: 0,
+            pin_hash: None,
+        };
+        store.create_user(&u).await.unwrap();
+        store
+            .upsert_device(&hc_types::device::DeviceState::new(
+                "light_desk",
+                "Desk",
+                "plugin.test",
+            ))
+            .await
+            .unwrap();
+        const SECRET: &[u8] = b"unit-test-secret-32-bytes-minimum!";
+        let token = hc_auth::JwtService::new_hs256(SECRET, 24)
+            .issue(&u.id.to_string(), &u.username, u.role, 0)
+            .unwrap();
+        let state = crate::AppState::new(crate::AppStateParams::new(
+            store,
+            hc_core::EventBus::new(16),
+            hc_auth::JwtService::new_hs256(SECRET, 24),
+        ));
+        let app = crate::router(state, None);
+
+        let call = |device: &str| {
+            let mut req = Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/devices/{device}/state"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"on": true}).to_string()))
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(std::net::SocketAddr::from((
+                    [10, 9, 8, 7],
+                    1234,
+                ))));
+            let app = app.clone();
+            async move {
+                let res = app.oneshot(req).await.unwrap();
+                let status = res.status();
+                let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                )
+            }
+        };
+
+        let (st, body) = call("light_desk").await;
+        assert_eq!(st, StatusCode::ACCEPTED);
+        assert_eq!(body["status"], json!("accepted"));
+        let cid = body["correlation_id"].as_str().expect("a correlation id");
+        assert!(Uuid::parse_str(cid).is_ok(), "{cid}");
+
+        let (st, body) = call("light_dsek").await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("light_dsek"));
     }
 }

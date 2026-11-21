@@ -67,3 +67,33 @@ pub fn load_profiles_from_dir(dir: &str) -> Result<Vec<EcosystemProfile>> {
 
     Ok(profiles)
 }
+
+/// Read every `*.rhai` transform script in `dir`, as `(file name, source)`
+/// sorted by file name, for [`crate::EcosystemRouter::with_scripts`].
+///
+/// Sorted so that when two scripts define the same function, which one wins
+/// does not depend on the order the directory happens to list them in.
+/// A missing directory has no scripts; an unreadable file is logged and skipped.
+pub fn load_transforms_from_dir(dir: &str) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("rhai"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            match std::fs::read_to_string(&path) {
+                Ok(src) => Some((name, src)),
+                Err(e) => {
+                    warn!(file = %path.display(), error = %e, "Cannot read Rhai script; skipping");
+                    None
+                }
+            }
+        })
+        .collect()
+}
