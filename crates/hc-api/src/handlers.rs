@@ -8284,6 +8284,26 @@ pub struct NotifyTestBody {
     pub message: Option<String>,
 }
 
+/// The notification channels a rule's `Notify` or an alert's `notify` can
+/// name, sorted. Names only: a channel's token, chat or address stay in
+/// `homecore.toml`.
+pub fn notify_channel_names(notify: Option<&hc_notify::NotificationService>) -> Vec<String> {
+    let mut names: Vec<String> = notify
+        .map(|n| n.channel_names().into_iter().map(str::to_string).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `GET /api/v1/notify/channels`: what can be named to send a notification
+/// to. `all` is every one of them and isn't listed.
+pub async fn list_notify_channels(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    Json(json!({ "channels": notify_channel_names(s.notify.as_deref()) }))
+}
+
 /// `POST /api/v1/notify/test`
 ///
 /// Send a message through a configured channel, so an operator can find out
@@ -9163,6 +9183,26 @@ token = "TOKEN-TWO"
             tv: 0,
             sid: None,
         }
+    }
+
+    // ── notify channels ─────────────────────────────────────────────────
+
+    #[test]
+    fn notify_channels_are_names_only_and_sorted() {
+        assert!(notify_channel_names(None).is_empty());
+        let cfg = |name: &str| -> hc_notify::ChannelConfig {
+            serde_json::from_value(json!({
+                "name": name, "type": "pushover",
+                "api_token": "secret-token", "user_key": "secret-user",
+            }))
+            .unwrap()
+        };
+        let svc = hc_notify::NotificationService::from_configs(vec![cfg("phone"), cfg("kitchen")])
+            .unwrap();
+        let names = notify_channel_names(Some(&svc));
+        assert_eq!(names, ["kitchen", "phone"]);
+        let body = json!({ "channels": names }).to_string();
+        assert!(!body.contains("secret"));
     }
 
     // ── notify test ─────────────────────────────────────────────────────
