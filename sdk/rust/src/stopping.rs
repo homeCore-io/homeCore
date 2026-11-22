@@ -31,7 +31,7 @@ pub(crate) const HANDLER_LIMIT: Duration = Duration::from_millis(1000);
 pub(crate) const DEADLINE: Duration = Duration::from_millis(1800);
 
 /// SIGTERM or Ctrl-C.
-pub(crate) async fn signal() {
+pub async fn signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -74,7 +74,16 @@ pub(crate) async fn goodbye(
     }
     let mut ids: Vec<String> = devices.lock().unwrap().snapshot().into_iter().collect();
     ids.sort();
-    for id in &ids {
+    send_goodbye(&client, &plugin_id, ids.iter().map(String::as_str)).await;
+}
+
+pub(crate) async fn send_goodbye<'a>(
+    client: &AsyncClient,
+    plugin_id: &str,
+    ids: impl ExactSizeIterator<Item = &'a str>,
+) {
+    let count = ids.len();
+    for id in ids {
         let topic = format!("homecore/devices/{id}/availability");
         let _ = client
             .publish(&topic, QoS::AtLeastOnce, true, "offline".as_bytes())
@@ -88,7 +97,7 @@ pub(crate) async fn goodbye(
             "offline".as_bytes(),
         )
         .await;
-    info!(plugin_id = %plugin_id, devices = ids.len(), "Plugin stopping; its devices are offline");
+    info!(plugin_id = %plugin_id, devices = count, "Plugin stopping; its devices are offline");
     let _ = client.disconnect().await;
 }
 

@@ -109,15 +109,17 @@ pub mod logging;
 use anyhow::{Context, Result};
 use hc_types::device::{change_from_command_payload, with_state_change_metadata, DeviceChange};
 use hc_types::PluginNotice;
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+mod subscriptions;
 use std::time::Duration;
+pub use subscriptions::{SubscriptionState, SubscriptionUpdates};
 use tracing::{debug, error, info, warn};
 
 pub use api_access::{ApiAccess, Caller};
-pub use stopping::{StopFuture, StopHandler};
+pub use stopping::{signal as wait_for_shutdown, StopFuture, StopHandler};
 pub use streaming::{StreamContext, StreamingAction};
 pub use supervised::SUPERVISED_ENV;
 
@@ -356,11 +358,12 @@ pub struct ReconcileReport {
 
 /// A cloneable handle for publishing device state from outside the `run()` loop.
 ///
-/// Obtained via [`PluginClient::device_publisher`] before calling `run()`.
+/// Obtained via [`PluginClient::device_publisher`] or attached to an existing MQTT session.
 #[derive(Clone)]
 pub struct DevicePublisher {
     client: AsyncClient,
     plugin_id: String,
+    retain_registration: bool,
     subscriptions: SubscriptionTracker,
     devices: DeviceTracker,
     alerts: AlertTracker,
@@ -371,6 +374,51 @@ pub fn change_from_command(command_payload: &Value, fallback_source: &str) -> De
 }
 
 impl DevicePublisher {
+    /// Publish through a caller-owned MQTT session. The caller drives its event
+    /// loop and handles reconnects and the broker Last Will.
+    pub fn from_mqtt_client(client: AsyncClient, plugin_id: impl Into<String>) -> Self {
+        Self {
+            client,
+            plugin_id: plugin_id.into(),
+            retain_registration: false,
+            subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            devices: Arc::new(Mutex::new(DeviceTrackerInner::default())),
+            alerts: Arc::new(Mutex::new(Default::default())),
+        }
+    }
+
+    /// Retain device registration messages for consumers of an existing contract.
+    pub fn with_retained_registration(mut self) -> Self {
+        self.retain_registration = true;
+        self
+    }
+
+    /// Publish the manifest when the caller owns the MQTT session lifecycle.
+    pub async fn publish_capabilities(&self, capabilities: &hc_types::Capabilities) -> Result<()> {
+        anyhow::ensure!(
+            capabilities.plugin_id == self.plugin_id,
+            "capability plugin ID mismatch"
+        );
+        publish_capability_manifest(
+            &self.client,
+            &self.plugin_id,
+            &serde_json::to_value(capabilities)?,
+        )
+        .await
+    }
+
+    /// Publish a heartbeat when the caller schedules it around its MQTT session.
+    pub async fn publish_heartbeat(
+        &self,
+        version: &str,
+        uptime_secs: u64,
+        notices: &[PluginNotice],
+        qos: QoS,
+    ) -> Result<()> {
+        let payload = heartbeat_payload(Some(version), uptime_secs, notices);
+        publish_heartbeat_message(&self.client, &self.plugin_id, &payload, qos).await
+    }
+
     /// Return the plugin ID this publisher was created with.
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
@@ -674,7 +722,7 @@ impl DevicePublisher {
             .publish(
                 &topic,
                 QoS::AtLeastOnce,
-                false,
+                self.retain_registration,
                 serde_json::to_vec(&payload)?,
             )
             .await
@@ -726,8 +774,23 @@ impl DevicePublisher {
     /// `register_device_full` for them first to bring them into the
     /// tracker.
     pub async fn reconcile_devices(&self, live: HashSet<String>) -> Result<ReconcileReport> {
+        self.reconcile_devices_in_scope(live, |_| true).await
+    }
+
+    /// Apply an authoritative inventory to a subset of devices this publisher
+    /// owns, for example one bridge when the plugin tracks several bridges.
+    /// Devices outside the scope are preserved.
+    pub async fn reconcile_devices_in_scope(
+        &self,
+        live: HashSet<String>,
+        in_scope: impl Fn(&str) -> bool,
+    ) -> Result<ReconcileReport> {
         let known = self.devices.lock().unwrap().snapshot();
-        let stale: Vec<String> = known.difference(&live).cloned().collect();
+        let stale: Vec<String> = known
+            .difference(&live)
+            .filter(|id| in_scope(id))
+            .cloned()
+            .collect();
         let unknown_in_live: Vec<String> = live.difference(&known).cloned().collect();
         let mut unregistered = Vec::with_capacity(stale.len());
         for id in &stale {
@@ -857,14 +920,52 @@ impl DevicePublisher {
         let mut opts = MqttOptions::new(format!("{plugin_id}-test"), "127.0.0.1", 1883);
         opts.set_keep_alive(Duration::from_secs(30));
         let (client, _eventloop) = AsyncClient::new(opts, 8);
-        Self {
-            client,
-            plugin_id: plugin_id.to_string(),
-            subscriptions: Arc::new(Mutex::new(HashSet::new())),
-            devices: Arc::new(Mutex::new(DeviceTrackerInner::default())),
-            alerts: Arc::new(Mutex::new(Default::default())),
-        }
+        Self::from_mqtt_client(client, plugin_id)
     }
+}
+
+async fn publish_capability_manifest(
+    client: &AsyncClient,
+    plugin_id: &str,
+    payload: &Value,
+) -> Result<()> {
+    client
+        .publish(
+            format!("homecore/plugins/{plugin_id}/capabilities"),
+            QoS::AtLeastOnce,
+            true,
+            serde_json::to_vec(payload)?,
+        )
+        .await
+        .context("publish capabilities failed")
+}
+
+fn heartbeat_payload(version: Option<&str>, uptime_secs: u64, notices: &[PluginNotice]) -> Value {
+    // Core checks the wire protocol version from hc-types, separate from the
+    // version of the SDK or plugin. Each beat replaces the full notice list.
+    json!({
+        "version": version,
+        "protocol_version": hc_types::PROTOCOL_VERSION,
+        "uptime_secs": uptime_secs,
+        "notices": notices,
+    })
+}
+
+async fn publish_heartbeat_message(
+    client: &AsyncClient,
+    plugin_id: &str,
+    payload: &Value,
+    qos: QoS,
+) -> Result<()> {
+    client
+        .publish(
+            format!("homecore/plugins/{plugin_id}/heartbeat"),
+            qos,
+            false,
+            serde_json::to_vec(payload)?,
+        )
+        .await
+        .context("publish heartbeat failed")
 }
 
 /// Boxed handler for management actions the built-in dispatcher does not
@@ -1307,12 +1408,76 @@ pub type CommandHandler = Box<dyn Fn(String, Value) + Send + Sync + 'static>;
 /// A connected plugin client.
 pub struct PluginClient {
     client: AsyncClient,
-    eventloop: EventLoop,
+    eventloop: ReconnectingMqtt,
     config: PluginConfig,
     subscriptions: SubscriptionTracker,
     devices: DeviceTracker,
     notices: NoticeTracker,
     alerts: AlertTracker,
+}
+
+struct ReconnectingMqtt {
+    eventloop: EventLoop,
+    delay: Duration,
+    retry_at: Option<tokio::time::Instant>,
+}
+
+impl ReconnectingMqtt {
+    async fn poll(&mut self) -> std::result::Result<Event, ConnectionError> {
+        if let Some(retry_at) = self.retry_at {
+            tokio::time::sleep_until(retry_at).await;
+            self.retry_at = None;
+        }
+        let event = self.eventloop.poll().await;
+        if event.is_err() {
+            self.retry_at = Some(tokio::time::Instant::now() + self.delay);
+        }
+        event
+    }
+}
+
+/// Lifetime of an SDK-driven MQTT session with service-specific message handling.
+pub struct MqttDriver {
+    task: tokio::task::JoinHandle<()>,
+    connections: tokio::sync::watch::Receiver<bool>,
+    client: AsyncClient,
+    plugin_id: String,
+}
+
+impl MqttDriver {
+    /// Observe broker connections and disconnections. Each ConnAck produces an update.
+    pub fn connections(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.connections.clone()
+    }
+
+    /// Close the MQTT socket and wait for the driver to stop.
+    pub async fn stop(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+
+    /// Publish offline for the specified devices and the plugin, then close the
+    /// session. An unreachable broker cannot hold up the service shutdown.
+    pub async fn shutdown(mut self, devices: &[&str]) {
+        if *self.connections.borrow()
+            && tokio::time::timeout(stopping::DEADLINE, async {
+                stopping::send_goodbye(&self.client, &self.plugin_id, devices.iter().copied())
+                    .await;
+                let _ = (&mut self.task).await;
+            })
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        self.stop().await;
+    }
+}
+
+impl Drop for MqttDriver {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Cloneable handle for persisting plugin learned-state deltas without holding
@@ -1374,17 +1539,115 @@ impl PluginClient {
             opts.set_credentials(&config.plugin_id, &config.password);
         }
 
-        let (client, eventloop) = AsyncClient::new(opts, 64);
+        Ok(Self::with_mqtt_options(
+            config.plugin_id,
+            opts,
+            64,
+            Duration::from_secs(2),
+        ))
+    }
+
+    /// Use the SDK reconnect loop with explicit MQTT identities, packet limits
+    /// or a device-specific Last Will. No process-wide supervision is started.
+    pub fn with_mqtt_options(
+        plugin_id: impl Into<String>,
+        options: MqttOptions,
+        queue_capacity: usize,
+        retry_delay: Duration,
+    ) -> Self {
+        let config = PluginConfig {
+            plugin_id: plugin_id.into(),
+            ..Default::default()
+        };
+        let (client, eventloop) = AsyncClient::new(options, queue_capacity);
         info!(plugin_id = %config.plugin_id, "Plugin connecting");
-        Ok(Self {
+        Self {
             client,
-            eventloop,
+            eventloop: ReconnectingMqtt {
+                eventloop,
+                delay: retry_delay,
+                retry_at: None,
+            },
             config,
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             devices: Arc::new(Mutex::new(DeviceTrackerInner::default())),
             notices: Arc::new(Mutex::new(Vec::new())),
             alerts: Arc::new(Mutex::new(Default::default())),
-        })
+        }
+    }
+
+    /// Run MQTT transport independently of device polling and publishing.
+    /// The callback must return promptly and never wait for the publish queue.
+    /// A service with an existing protocol can inspect raw packets, including
+    /// retained flags and subscription acknowledgements.
+    pub fn start_mqtt(
+        self,
+        mut on_event: impl FnMut(std::result::Result<Event, ConnectionError>) + Send + 'static,
+    ) -> MqttDriver {
+        self.start_mqtt_driver(move |event, _| on_event(event))
+    }
+
+    /// Subscribe to a fixed set of filters on each connection and track the
+    /// broker's acknowledgement. This driver owns all subscriptions on the
+    /// session. Use the state passed to the callback before acting on messages.
+    pub fn start_mqtt_subscribed(
+        mut self,
+        filters: Vec<rumqttc::SubscribeFilter>,
+        mut on_event: impl FnMut(std::result::Result<Event, ConnectionError>, &SubscriptionState)
+            + Send
+            + 'static,
+    ) -> (MqttDriver, SubscriptionUpdates) {
+        self.eventloop
+            .eventloop
+            .mqtt_options
+            .set_clean_session(true);
+        let (state, updates) = tokio::sync::watch::channel(SubscriptionState::Disconnected);
+        let mut subscriptions = subscriptions::Subscriptions {
+            filters,
+            state,
+            packet_id: None,
+        };
+        let driver = self.start_mqtt_driver(move |event, driver| {
+            subscriptions.observe(&event, driver);
+            on_event(event, &subscriptions.state.borrow());
+        });
+        (driver, SubscriptionUpdates(updates))
+    }
+
+    fn start_mqtt_driver(
+        self,
+        mut on_event: impl FnMut(std::result::Result<Event, ConnectionError>, &mut EventLoop)
+            + Send
+            + 'static,
+    ) -> MqttDriver {
+        let mut eventloop = self.eventloop;
+        let (connected, connections) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            loop {
+                let event = eventloop.poll().await;
+                match &event {
+                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                        connected.send_replace(true);
+                    }
+                    Err(_) => {
+                        connected.send_if_modified(|online| std::mem::replace(online, false));
+                    }
+                    _ => {}
+                }
+                let disconnected =
+                    matches!(event, Ok(Event::Outgoing(rumqttc::Outgoing::Disconnect)));
+                on_event(event, &mut eventloop.eventloop);
+                if disconnected {
+                    break;
+                }
+            }
+        });
+        MqttDriver {
+            task,
+            connections,
+            client: self.client,
+            plugin_id: self.config.plugin_id,
+        }
     }
 
     /// Return the plugin ID.
@@ -1779,6 +2042,7 @@ impl PluginClient {
         DevicePublisher {
             client: self.client.clone(),
             plugin_id: self.config.plugin_id.clone(),
+            retain_registration: false,
             subscriptions: Arc::clone(&self.subscriptions),
             devices: Arc::clone(&self.devices),
             alerts: Arc::clone(&self.alerts),
@@ -1824,41 +2088,17 @@ impl PluginClient {
                 interval.tick().await;
                 let uptime_secs = started_at.elapsed().as_secs();
                 let device_count = hb_devices.lock().unwrap().len() as u64;
-                let payload = serde_json::json!({
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                    "version": hb_version,
-                    // This crate's own version. Informational only: it tells
-                    // an operator which SDK to rebuild against, and appears in
-                    // core's logs beside any protocol complaint.
-                    //
-                    // It is deliberately NOT what core checks compatibility on.
-                    // It used to be, compared against hc_types::PROTOCOL_VERSION
-                    // — but this crate and hc-types are versioned independently
-                    // (0.3.x against 0.1.x), and below 1.0 a differing MINOR
-                    // reads as breaking, so the check could never pass and
-                    // warned about every plugin forever.
-                    "sdk_version": env!("CARGO_PKG_VERSION"),
-                    // The wire protocol this plugin was compiled against — the
-                    // hc-types version, which is what actually decides whether
-                    // core and this plugin agree on the shape of a device, an
-                    // event, or a command. Core compares it against its own.
-                    "protocol_version": hc_types::PROTOCOL_VERSION,
-                    "uptime_secs": uptime_secs,
-                    "device_count": device_count,
-                    // Full current set every beat — core replaces rather than
-                    // merges, so a cleared condition disappears on its own and
-                    // there is nothing to expire.
-                    "notices": hb_notices.lock().unwrap().clone(),
-                });
-                let topic = format!("homecore/plugins/{hb_plugin_id}/heartbeat");
-                let _ = hb_client
-                    .publish(
-                        &topic,
-                        QoS::AtMostOnce,
-                        false,
-                        serde_json::to_vec(&payload).unwrap_or_default(),
-                    )
-                    .await;
+                let mut payload = heartbeat_payload(
+                    hb_version.as_deref(),
+                    uptime_secs,
+                    &hb_notices.lock().unwrap(),
+                );
+                payload["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+                payload["sdk_version"] = json!(env!("CARGO_PKG_VERSION"));
+                payload["device_count"] = json!(device_count);
+                let _ =
+                    publish_heartbeat_message(&hb_client, &hb_plugin_id, &payload, QoS::AtMostOnce)
+                        .await;
             }
         });
 
@@ -2130,8 +2370,6 @@ impl PluginClient {
                                 || !mgmt.alert_kinds.is_empty()
                                 || mgmt.ui.is_some()
                             {
-                                let topic =
-                                    format!("homecore/plugins/{}/capabilities", mgmt.plugin_id);
                                 // Synthesize an empty manifest for a schema-only plugin.
                                 let synthesized;
                                 let caps = match mgmt.capabilities {
@@ -2156,9 +2394,12 @@ impl PluginClient {
                                     mgmt.ui.as_ref(),
                                 );
                                 if !manifest.is_null() {
-                                    let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
-                                    if let Err(e) =
-                                        client.publish(&topic, QoS::AtLeastOnce, true, bytes).await
+                                    if let Err(e) = publish_capability_manifest(
+                                        &client,
+                                        &mgmt.plugin_id,
+                                        &manifest,
+                                    )
+                                    .await
                                     {
                                         warn!(error = %e, "Failed to publish capabilities");
                                     }
@@ -2362,7 +2603,6 @@ impl PluginClient {
                 Ok(_) => {}
                 Err(e) => {
                     error!(error = %e, "Plugin MQTT error; retrying");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         }
