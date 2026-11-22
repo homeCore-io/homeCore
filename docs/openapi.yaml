@@ -8352,6 +8352,35 @@ paths:
                 type: object
                 additionalProperties: true
 
+  /notify/channels:
+    get:
+      operationId: listNotifyChannels
+      summary: The notification channels that can be named
+      description: |
+        The names a rule's `Notify` action or an alert's `notify` can send to,
+        from `[[notify.channels]]`, sorted. `all`, every one of them, isn't
+        listed. Names only: a channel's token, chat or address is never sent.
+        A channel whose settings failed to load at startup isn't listed. Needs
+        `automations:read`.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The channels
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [channels]
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      type: string
+              example:
+                channels: [phone, telegram]
+
   /notify/test:
     post:
       operationId: notifyTest
