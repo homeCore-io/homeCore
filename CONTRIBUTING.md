@@ -13,10 +13,16 @@ https://homecore.io/docs/development/contributing. In short:
 - **Leave out** git submodules, dependencies on repositories outside
   homeCore-io, generated or benchmark files, version bumps and release notes.
 
-**Plugins** can live in this repository under `plugins/hc-<name>`, or in a
-repository of your own and be listed in the Catalog through
-[homeCore-io/registry](https://github.com/homeCore-io/registry/issues). See
-"Contributing a plugin" in the guide.
+**Plugins** can live in this repository under `plugins/hc-<name>` (Rust), or
+in a repository of your own: Python and Node.js plugins run in a plugin
+runtime, and are listed in the Catalog through
+[homeCore-io/registry](https://github.com/homeCore-io/registry/issues). A
+service you run yourself can also add devices over MQTT. See "Contributing a
+plugin" in the guide.
+
+**SDK changes** have to work for every plugin, not one deployment: follow what
+the existing calls send, keep the MQTT protocol as it is unless an issue agreed
+otherwise, and add tests.
 
 Contributions are licensed under MIT or Apache 2.0, at your option, like the
 rest of homeCore.
