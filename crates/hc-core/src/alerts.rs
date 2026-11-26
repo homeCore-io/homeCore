@@ -577,6 +577,14 @@ pub fn desired(
                 since(d, attr),
             ));
         }
+        if let Some(attr) = first_true(d, &["co_detected"]) {
+            add(built_in(
+                AlertKind::CarbonMonoxide,
+                AlertSeverity::Critical,
+                "Carbon monoxide".into(),
+                since(d, attr),
+            ));
+        }
         let jammed = d.attributes.get("jammed") == Some(&Value::Bool(true))
             || d.attributes
                 .get("last_alert")
@@ -1038,6 +1046,26 @@ mod tests {
         assert_eq!(wet.message, "kitchen leak: wet");
         assert_eq!(wet.reason, "Wet");
         assert!(out.contains_key("smoke:hall_smoke"));
+    }
+
+    #[test]
+    fn carbon_monoxide_is_urgent_too() {
+        let d = [device(
+            "hall_alarm",
+            json!({"smoke": false, "co_detected": true}),
+        )];
+        let out = pass(
+            &d,
+            &[],
+            &BTreeMap::new(),
+            Utc::now(),
+            at(12, 0),
+            &mut Memory::default(),
+        );
+        let co = &out["carbon_monoxide:hall_alarm"];
+        assert_eq!(co.severity, AlertSeverity::Critical);
+        assert_eq!(co.reason, "Carbon monoxide");
+        assert!(!out.contains_key("smoke:hall_alarm"));
     }
 
     #[test]

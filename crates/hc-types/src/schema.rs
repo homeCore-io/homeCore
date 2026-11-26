@@ -78,7 +78,7 @@ fn readings_for_type(device_type: &str) -> &'static [&'static str] {
 ///
 /// **A multi-sensor that reports motion is a motion sensor.** Presence and
 /// safety come before measurement, and measurement before everything else.
-const READING_RANK: [&str; 22] = [
+const READING_RANK: [&str; 23] = [
     "motion",
     "occupancy",
     "occupied",
@@ -86,6 +86,7 @@ const READING_RANK: [&str; 22] = [
     "contact",
     "water_detected",
     "smoke",
+    "co_detected",
     "tampered",
     "locked",
     "on",
