@@ -30,8 +30,9 @@ prefix      = "tasmota_"
 # ---------------------------------------------------------------------------
 
 [[ecosystem.state_topics]]
-pattern   = "stat/{device}/POWER"
-attribute = "on"
+pattern     = "stat/{device}/POWER"
+attribute   = "on"
+device_type = "switch"           # a dimmer: give it "dimmer_light" under [ecosystem.devices] below
 
   [ecosystem.state_topics.coerce]
   on = "onoff_to_bool"             # "ON" → true, "OFF" → false
@@ -58,17 +59,19 @@ pattern   = "stat/{device}/RESULT"
 # ---------------------------------------------------------------------------
 
 [[ecosystem.state_topics]]
-pattern   = "stat/{device}/POWER1"
-device_id = "{device}_relay1"
-attribute = "on"
+pattern     = "stat/{device}/POWER1"
+device_id   = "tasmota_{device}_relay1"
+attribute   = "on"
+device_type = "switch"
 
   [ecosystem.state_topics.coerce]
   on = "onoff_to_bool"
 
 [[ecosystem.state_topics]]
-pattern   = "stat/{device}/POWER2"
-device_id = "{device}_relay2"
-attribute = "on"
+pattern     = "stat/{device}/POWER2"
+device_id   = "tasmota_{device}_relay2"
+attribute   = "on"
+device_type = "switch"
 
   [ecosystem.state_topics.coerce]
   on = "onoff_to_bool"
@@ -161,3 +164,17 @@ attribute = "on"
 source    = "homecore/devices/tasmota_{device}/cmd"
 target    = "cmnd/{device}/Backlog"
 transform = "homecore_cmd_to_tasmota_backlog"
+
+
+# ---------------------------------------------------------------------------
+# What individual devices are
+#
+# A device_type gives a device that type's schema from device-types.toml, so
+# the app shows its controls. The POWER topics above make every Tasmota a
+# "switch"; say otherwise for one device here, by its homeCore device ID, and
+# give it the name homeCore shows (a rename in the app still wins).
+# ---------------------------------------------------------------------------
+
+# [ecosystem.devices.tasmota_hall_dimmer]
+# device_type = "dimmer_light"
+# name        = "Hall lights"

@@ -6,11 +6,14 @@
 
 use crate::coerce;
 use crate::pattern::{match_segments, parse_pattern, render_template, sanitize_id, Segment};
-use crate::profile::{AvailabilityTopicConfig, CmdTopicConfig, EcosystemProfile, StateTopicConfig};
+use crate::profile::{
+    AvailabilityTopicConfig, CmdTopicConfig, DeviceConfig, EcosystemProfile, StateTopicConfig,
+};
 use anyhow::{anyhow, Result};
 use rhai::{Engine, Scope, AST};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -27,6 +30,9 @@ pub enum InboundResult {
         /// True → publish to `.../state/partial` (merge-patch).
         /// False → publish to `.../state` (full replace).
         partial: bool,
+        /// What the device is, when the profile says: its type and name.
+        /// `None` when the profile says neither.
+        device: Option<DeviceConfig>,
     },
     /// An availability update — set `device.available`.
     Availability { device_id: String, available: bool },
@@ -46,6 +52,8 @@ pub struct OutboundResult {
 struct CompiledState {
     segments: Vec<Segment>,
     profile_prefix: String,
+    /// The profile's per-device table, shared by its state topics.
+    devices: Arc<HashMap<String, DeviceConfig>>,
     config: StateTopicConfig,
 }
 
@@ -141,6 +149,24 @@ impl EcosystemRouter {
         router
     }
 
+    /// Every device type a loaded profile names, on a topic or for one device,
+    /// sorted and once each.
+    pub fn device_types_named(&self) -> Vec<String> {
+        let mut named: Vec<String> = self
+            .state_entries
+            .iter()
+            .filter_map(|e| e.config.device_type.clone())
+            .chain(
+                self.state_entries
+                    .iter()
+                    .flat_map(|e| e.devices.values().filter_map(|d| d.device_type.clone())),
+            )
+            .collect();
+        named.sort();
+        named.dedup();
+        named
+    }
+
     /// Transform names used by a topic that no loaded script defines with
     /// one parameter, sorted.
     pub fn missing_transforms(&self) -> Vec<String> {
@@ -175,11 +201,13 @@ impl EcosystemRouter {
 
         for profile in profiles {
             let prefix = profile.prefix.clone();
+            let devices = Arc::new(profile.devices);
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
                     segments: parse_pattern(&sc.pattern),
                     profile_prefix: prefix.clone(),
+                    devices: Arc::clone(&devices),
                     config: sc,
                 });
             }
@@ -253,6 +281,7 @@ impl EcosystemRouter {
 
         // Resolve device ID.
         let device_id = resolve_device_id(config, prefix, vars);
+        let device = describe_device(entry, &device_id, vars);
 
         // Apply optional Rhai transform on the raw payload first.
         let payload_bytes = if let Some(fn_name) = &config.transform {
@@ -301,6 +330,7 @@ impl EcosystemRouter {
                 device_id,
                 payload: Value::Object(obj),
                 partial: true, // scalar topics are always partial updates
+                device,
             });
         }
 
@@ -317,6 +347,7 @@ impl EcosystemRouter {
             device_id,
             payload: mapped,
             partial,
+            device,
         })
     }
 
@@ -635,6 +666,26 @@ fn result_device_id(r: &InboundResult) -> &str {
 }
 
 /// Resolve the homeCore device ID for a state topic match.
+/// What a state topic and the profile's device table say a device is. The
+/// device's own entry wins, field by field, over the topic's.
+fn describe_device(
+    entry: &CompiledState,
+    device_id: &str,
+    vars: &HashMap<String, String>,
+) -> Option<DeviceConfig> {
+    let own = entry.devices.get(device_id);
+    let device_type = own
+        .and_then(|d| d.device_type.clone())
+        .or_else(|| entry.config.device_type.clone())
+        .filter(|t| !t.trim().is_empty());
+    let name = own
+        .and_then(|d| d.name.clone())
+        .or_else(|| entry.config.name.as_ref().map(|t| render_template(t, vars)))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    (device_type.is_some() || name.is_some()).then_some(DeviceConfig { device_type, name })
+}
+
 fn resolve_device_id(
     config: &StateTopicConfig,
     prefix: &str,
@@ -1127,5 +1178,68 @@ transform = "cmd_to_native"
             vec!["cmd_to_native".to_string(), "raw_to_state".to_string()]
         );
         assert!(r.route_inbound("rt/lamp/raw", b"x").is_err());
+    }
+
+    // ── What a device is ─────────────────────────────────────────────────────
+
+    fn described(r: &EcosystemRouter, topic: &str, payload: &[u8]) -> Option<DeviceConfig> {
+        match r.route_inbound(topic, payload).unwrap() {
+            Some(InboundResult::State { device, .. }) => device,
+            other => panic!("expected state, got {other:?}"),
+        }
+    }
+
+    fn described_router() -> EcosystemRouter {
+        let profile = crate::loader::load_profile_str(
+            r#"
+            [ecosystem]
+            name   = "demo"
+            prefix = "demo_"
+
+            [[ecosystem.state_topics]]
+            pattern     = "demo/{device}/power"
+            attribute   = "on"
+            device_type = "switch"
+            name        = "Plug {device}"
+
+            [[ecosystem.state_topics]]
+            pattern = "demo/{device}/sensor"
+
+            [ecosystem.devices.demo_hall]
+            name = "Hall lamp"
+
+            [ecosystem.devices.demo_porch]
+            device_type = "light"
+            "#,
+        )
+        .unwrap();
+        EcosystemRouter::new(vec![profile], None).unwrap()
+    }
+
+    #[test]
+    fn a_topic_says_what_its_devices_are() {
+        let d = described(&described_router(), "demo/kitchen/power", b"1").unwrap();
+        assert_eq!(d.device_type.as_deref(), Some("switch"));
+        assert_eq!(d.name.as_deref(), Some("Plug kitchen"));
+    }
+
+    #[test]
+    fn a_device_s_own_entry_wins_field_by_field() {
+        let r = described_router();
+        let hall = described(&r, "demo/hall/power", b"1").unwrap();
+        assert_eq!(hall.name.as_deref(), Some("Hall lamp"));
+        assert_eq!(hall.device_type.as_deref(), Some("switch"));
+        // On a topic that says nothing, the device's entry alone.
+        let porch = described(&r, "demo/porch/sensor", br#"{"lux":3}"#).unwrap();
+        assert_eq!(porch.device_type.as_deref(), Some("light"));
+        assert_eq!(porch.name, None);
+    }
+
+    #[test]
+    fn a_topic_that_says_nothing_describes_nothing() {
+        assert_eq!(
+            described(&described_router(), "demo/garage/sensor", br#"{"lux":3}"#),
+            None
+        );
     }
 }

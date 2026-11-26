@@ -784,11 +784,14 @@ async fn main() -> Result<()> {
     .with_alert_channel(config.alerts.notify_channel.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
+    let mut type_catalog: Option<Arc<DeviceTypeRegistry>> = None;
     match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
         Ok(registry) => {
             let count = registry.type_names().count();
             info!(path = %device_types_path.display(), count, "Device type registry loaded");
-            core = core.with_device_types(Arc::new(registry));
+            let registry = Arc::new(registry);
+            type_catalog = Some(Arc::clone(&registry));
+            core = core.with_device_types(registry);
         }
         Err(_e) if !device_types_path.exists() => {
             info!(path = %device_types_path.display(), "No device type registry found; typed devices will not have auto schemas");
@@ -806,6 +809,7 @@ async fn main() -> Result<()> {
         Ok(profiles) if !profiles.is_empty() => {
             let scripts = load_transforms_from_dir(&config.profiles.dir);
             let router = EcosystemRouter::with_scripts(profiles, &scripts);
+            warn_about_profile_device_types(&router, type_catalog.as_deref(), &device_types_path);
             mqtt_client.add_subscription("#");
             info!(
                 scripts = scripts.len(),
@@ -1568,6 +1572,46 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Say once, at startup, when a profile names a device type the catalog
+/// can't give a schema for. Its devices would get the type and no schema, so
+/// no controls in the app, and nothing else would say why.
+fn warn_about_profile_device_types(
+    router: &EcosystemRouter,
+    catalog: Option<&DeviceTypeRegistry>,
+    catalog_path: &Path,
+) {
+    let named = router.device_types_named();
+    if named.is_empty() {
+        return;
+    }
+    let Some(catalog) = catalog else {
+        tracing::warn!(
+            types = %named.join(", "),
+            path = %catalog_path.display(),
+            "Ecosystem profiles name device types, but there is no device type catalog, so \
+             their devices get no schema and no controls in the app. Copy device-types.toml \
+             from config/profiles/examples into the profiles folder."
+        );
+        return;
+    };
+    let unknown: Vec<String> = named
+        .into_iter()
+        .filter(|t| {
+            catalog
+                .get_device_schema(&hc_topic_map::canonical_device_type_name(t))
+                .is_none()
+        })
+        .collect();
+    if !unknown.is_empty() {
+        tracing::warn!(
+            types = %unknown.join(", "),
+            path = %catalog_path.display(),
+            "Ecosystem profiles name device types the catalog doesn't have; their devices \
+             get no schema"
+        );
+    }
 }
 
 #[cfg(test)]

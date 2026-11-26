@@ -94,3 +94,36 @@ fn a_relay_command_reaches_its_relay() {
     assert_eq!(topic, "cmnd/strip/POWER1");
     assert_eq!(payload, "ON");
 }
+
+fn device_of(topic: &str, payload: &str) -> (String, Option<String>) {
+    let profiles = load_profiles_from_dir("../../config/profiles/examples")
+        .expect("Failed to load example profiles");
+    let router = EcosystemRouter::new(profiles, None).expect("Router build failed");
+    match router.route_inbound(topic, payload.as_bytes()).unwrap() {
+        Some(InboundResult::State {
+            device_id, device, ..
+        }) => (device_id, device.and_then(|d| d.device_type)),
+        other => panic!("expected State for {topic}, got {other:?}"),
+    }
+}
+
+/// A relay's readings and its commands are one device. The relay state
+/// topics used to name it without the profile's prefix (`strip_relay1`), so
+/// its readings went to one device and its commands to another.
+#[test]
+fn a_relay_s_readings_and_commands_are_one_device() {
+    let (id, device_type) = device_of("stat/strip/POWER1", "ON");
+    assert_eq!(id, "tasmota_strip_relay1");
+    assert_eq!(device_type.as_deref(), Some("switch"));
+    let (topic, _) = command(&format!("homecore/devices/{id}/cmd"), r#"{"on":true}"#);
+    assert_eq!(topic, "cmnd/strip/POWER1");
+}
+
+/// A plain Tasmota is a switch, so it gets the switch schema and the app
+/// shows its control.
+#[test]
+fn a_tasmota_is_a_switch() {
+    let (id, device_type) = device_of("stat/plug/POWER", "ON");
+    assert_eq!(id, "tasmota_plug");
+    assert_eq!(device_type.as_deref(), Some("switch"));
+}

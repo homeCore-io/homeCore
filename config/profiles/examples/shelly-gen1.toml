@@ -70,9 +70,10 @@ prefix      = "shelly_"
 # Payload: "on" | "off" | "overpower"
 # {relay} captures the relay index (0, 1, 2, 3).
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/{relay}"
-device_id = "shelly_{device}_relay{relay}"
-attribute = "on"
+pattern     = "shellies/{device}/relay/{relay}"
+device_id   = "shelly_{device}_relay{relay}"
+attribute   = "on"
+device_type = "switch"
 
   [ecosystem.state_topics.coerce]
   on = "onoff_to_bool"           # "on" → true, "off"/"overpower" → false
@@ -169,9 +170,10 @@ attribute = "on"
 # Roller movement state
 # Payload: "open" | "close" | "stop"
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/roller/{roller}"
-device_id = "shelly_{device}_roller{roller}"
-attribute = "state"
+pattern     = "shellies/{device}/roller/{roller}"
+device_id   = "shelly_{device}_roller{roller}"
+attribute   = "state"
+device_type = "cover"
 # "state" is passed through as-is (string)
 
 
