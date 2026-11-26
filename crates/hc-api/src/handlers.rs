@@ -6305,17 +6305,27 @@ pub async fn get_plugin_config(
     _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // A plugin placed on a plugin runtime has no config_path of its own, but
+    // core holds its config (see placed_config) — before it has ever
+    // registered, too.
+    let placed = crate::plugin_runtime_handlers::placed_config(&s, &id);
     let (config_path, managed) = {
         let map = s.plugins.read().await;
-        let Some(rec) = map.get(&id) else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "plugin not found" })),
-            )
-                .into_response();
-        };
-        (rec.config_path.clone(), rec.managed)
+        match (map.get(&id), &placed) {
+            (Some(rec), _) => (rec.config_path.clone(), rec.managed),
+            (None, Some(_)) => (None, false),
+            (None, None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "plugin not found" })),
+                )
+                    .into_response();
+            }
+        }
     };
+    // Read core's copy, redacted like any other, rather than ask the plugin
+    // (whose answer is whatever text its SDK sends back).
+    let config_path = config_path.or_else(|| placed.as_ref().map(|(p, _)| p.clone()));
 
     // Local plugin: read config file directly.
     //
@@ -6358,6 +6368,11 @@ pub async fn get_plugin_config(
         match rpc.get_config(&id).await {
             Ok(resp) => {
                 let mut cfg = resp.get("data").cloned().unwrap_or(resp);
+                // The JS and Python SDKs answer with the file as one string,
+                // which redact_json_secrets has no keys to find in.
+                if let Value::String(text) = &cfg {
+                    cfg = Value::String(redact_toml_text(text));
+                }
                 redact_json_secrets(&mut cfg);
                 (
                     StatusCode::OK,
@@ -6393,17 +6408,29 @@ pub async fn put_plugin_config(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    // A plugin placed on a plugin runtime has no config_path of its own, but
+    // core holds its config (see placed_config) — before it has ever
+    // registered, too.
+    let placed = crate::plugin_runtime_handlers::placed_config(&s, &id);
     let (config_path, managed) = {
         let map = s.plugins.read().await;
-        let Some(rec) = map.get(&id) else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "plugin not found" })),
-            )
-                .into_response();
-        };
-        (rec.config_path.clone(), rec.managed)
+        match (map.get(&id), &placed) {
+            (Some(rec), _) => (rec.config_path.clone(), rec.managed),
+            (None, Some(_)) => (None, false),
+            (None, None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "plugin not found" })),
+                )
+                    .into_response();
+            }
+        }
     };
+    // A plugin on a plugin runtime: write core's copy, which the runtime is
+    // served. Its set_config would only change the runtime's copy, which the
+    // next check-in replaces, and restart nothing.
+    let placed = if config_path.is_none() { placed } else { None };
+    let config_path = config_path.or_else(|| placed.as_ref().map(|(p, _)| p.clone()));
 
     // Local plugin: write config file directly.
     if let Some(ref path) = config_path {
@@ -6499,8 +6526,17 @@ pub async fn put_plugin_config(
                 .into_response();
         };
 
-        return match std::fs::write(path, &toml_str) {
+        // Atomic: a runtime may be reading this file for its check-in.
+        return match crate::config_writer::write_atomic(
+            std::path::Path::new(path),
+            toml_str.as_bytes(),
+        ) {
             Ok(()) => {
+                // The runtime restarts the plugin when the text it is served
+                // changes; ask it to look now rather than at its next poll.
+                if let Some((_, runtime_id)) = &placed {
+                    crate::plugin_runtime_handlers::nudge_runtime(&s, runtime_id);
+                }
                 (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response()
             }
             Err(e) => (
@@ -6516,10 +6552,20 @@ pub async fn put_plugin_config(
         let mut config = body.get("config").cloned().unwrap_or(body.clone());
         // Same restore as the local path — fetch what the plugin currently holds
         // and put the real secrets back before pushing the document to it.
-        if has_redaction(&config) {
+        let masked = match &config {
+            Value::String(text) => text.contains(REDACTED_SECRET),
+            other => has_redaction(other),
+        };
+        if masked {
             if let Ok(current) = rpc.get_config(&id).await {
                 let current = current.get("data").cloned().unwrap_or(current);
-                restore_json_secrets(&mut config, &current);
+                match (&config, &current) {
+                    // The file as text, as GET hands it out for these plugins.
+                    (Value::String(text), Value::String(held)) => {
+                        config = Value::String(restore_toml_secrets(text, held));
+                    }
+                    _ => restore_json_secrets(&mut config, &current),
+                }
             }
         }
         match rpc.set_config(&id, config).await {

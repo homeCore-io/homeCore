@@ -5645,6 +5645,12 @@ paths:
         For remote plugins, core issues a `get_config` management RPC over MQTT
         and returns the plugin's reply (its `data` field when present, else the
         whole reply) under `config`, with `format: "remote"`.
+        A plugin placed on a plugin runtime counts as local: its config is
+        core's `config/plugins/<id>.toml`, the file the runtime is served, so
+        it comes back as `format: "toml"` like any other — also before the
+        plugin has first registered. `PUT` writes that file and asks the
+        runtime to check in, and the runtime restarts the plugin on the new
+        text.
 
         **Secrets are redacted.** Values whose key names a credential —
         `password`, `app_key`, `client_secret`, `token`, and similar — come back

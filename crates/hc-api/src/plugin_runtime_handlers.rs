@@ -607,6 +607,25 @@ pub fn place_on_runtime(
     Ok(())
 }
 
+/// A plugin placed on a runtime: core's own copy of its config
+/// (`config/plugins/<id>.toml`, which is what the runtime is served and
+/// restarts the plugin on when it changes) and the runtime it is on.
+///
+/// The plugin's own copy, inside the runtime, is not the config: the next
+/// check-in replaces it with this one. So reading and writing a placed
+/// plugin's config goes here, never through the plugin's set_config.
+pub fn placed_config(state: &AppState, plugin_id: &str) -> Option<(String, String)> {
+    let ctx = state.plugin_install.as_ref()?;
+    let placement = store(state)
+        .all_placements()
+        .ok()?
+        .into_iter()
+        .find(|p| p.plugin_id == plugin_id)?;
+    let path = crate::plugin_config_store::PluginConfigStore::new(ctx.config_plugins_dir.clone())
+        .path_for(plugin_id);
+    Some((path.display().to_string(), placement.runtime_id))
+}
+
 /// Ask a runtime to check in now, so a placement it has just been given (or
 /// lost) is installed, updated or removed in seconds instead of on its next
 /// poll.
