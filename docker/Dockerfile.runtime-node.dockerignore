@@ -1,0 +1,7 @@
+# Build context is the core repo root; the image needs only what the runtime
+# host compiles from, plus the files under docker/.
+target
+**/target
+**/node_modules
+**/ui/dist
+.git
