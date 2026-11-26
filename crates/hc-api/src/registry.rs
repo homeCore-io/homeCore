@@ -611,6 +611,47 @@ mod tests {
             .is_none());
     }
 
+    /// Nothing about Python is special: a Node build and interpreter are found
+    /// the same way, by kind, series, platform and arch.
+    #[test]
+    fn any_kind_with_an_interpreter_is_runnable() {
+        let index: RegistryIndex = serde_json::from_value(serde_json::json!({
+            "plugins": [{"id": "plugin.matter", "name": "Matter", "versions": [{
+                "version": "0.2.0",
+                "artifacts": [
+                    {"os": "linux", "arch": "aarch64", "runtime": "node",
+                     "abi": "node24-glibc_2_28", "url": "n24", "sha256": "a"},
+                    {"os": "linux", "arch": "aarch64", "runtime": "node",
+                     "abi": "node26-glibc_2_28", "url": "n26", "sha256": "b"}
+                ]
+            }]}],
+            "interpreters": [
+                {"kind": "node", "version": "24.11.0", "abi": "node24", "os": "linux",
+                 "arch": "aarch64", "url": "i", "sha256": "1"},
+                {"kind": "node", "version": "24.11.1", "abi": "node24", "os": "linux",
+                 "arch": "aarch64", "url": "i", "sha256": "2"},
+                {"kind": "python", "version": "3.13.18", "abi": "cp313", "os": "linux",
+                 "arch": "aarch64", "url": "i", "sha256": "3"}
+            ]
+        }))
+        .unwrap();
+        let pv = &index.plugin("plugin.matter").unwrap().versions[0];
+        // node26 has no interpreter, so the node24 build runs, on the newest patch.
+        let (art, interp) = index
+            .runtime_build(pv, "node", "glibc_2_28", "aarch64")
+            .unwrap();
+        assert_eq!(art.url, "n24");
+        assert_eq!(interp.version, "24.11.1");
+        // A Python runtime is not offered a Node build.
+        assert!(index
+            .runtime_build(pv, "python", "glibc_2_28", "aarch64")
+            .is_none());
+        assert_eq!(
+            crate::plugin_runtime_handlers::index_kinds(&index),
+            ["node", "python"]
+        );
+    }
+
     fn plugin_with(versions: &[&str]) -> RegistryPlugin {
         RegistryPlugin {
             id: "plugin.demo".into(),

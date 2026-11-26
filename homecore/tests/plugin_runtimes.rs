@@ -67,7 +67,7 @@ async fn a_runtime_is_added_connects_and_is_reset_and_removed() {
     // Adding it makes the login and hands the key back, once.
     let r = add(
         &base,
-        serde_json::json!({"name": "Python runtime 1", "homecore_url": "http://homecore.local:8080"}),
+        serde_json::json!({"name": "Python runtime 1", "kind": "python", "homecore_url": "http://homecore.local:8080"}),
     )
     .await;
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -216,16 +216,16 @@ async fn adding_says_what_is_wrong_with_the_form() {
 
     for (body, says) in [
         (
-            serde_json::json!({"name": " ", "homecore_url": "http://h:8080"}),
+            serde_json::json!({"name": " ", "kind": "python", "homecore_url": "http://h:8080"}),
             "name",
         ),
         (
-            serde_json::json!({"name": "R", "homecore_url": "h:8080"}),
+            serde_json::json!({"name": "R", "kind": "python", "homecore_url": "h:8080"}),
             "http",
         ),
         (
-            serde_json::json!({"name": "R", "kind": "node", "homecore_url": "http://h:8080"}),
-            "python",
+            serde_json::json!({"name": "R", "kind": "Node JS", "homecore_url": "http://h:8080"}),
+            "lowercase",
         ),
     ] {
         let r = add(&base, body).await;
@@ -239,7 +239,7 @@ async fn adding_says_what_is_wrong_with_the_form() {
     let h2 = Harness::start(&tmp2).await.unwrap();
     let r = add(
         &h2.tcp_base(),
-        serde_json::json!({"name": "R", "homecore_url": "http://h:8080"}),
+        serde_json::json!({"name": "R", "kind": "python", "homecore_url": "http://h:8080"}),
     )
     .await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
@@ -276,7 +276,7 @@ async fn a_runtime_can_be_renamed_and_given_a_limit() {
     let http = reqwest::Client::new();
     let issued: IssuedKey = add(
         &base,
-        serde_json::json!({"name": "Pi", "homecore_url": "http://h:8080", "max_plugins": 3}),
+        serde_json::json!({"name": "Pi", "kind": "python", "homecore_url": "http://h:8080", "max_plugins": 3}),
     )
     .await
     .json()
@@ -310,5 +310,151 @@ async fn a_runtime_can_be_renamed_and_given_a_limit() {
     let v = set(serde_json::json!({"max_plugins": null})).await;
     assert!(v.get("max_plugins").is_none(), "{v}");
 
+    h.stop().await;
+}
+
+/// homeCore names no language: a runtime of any kind is added, and its first
+/// check-in records the platform its image provides. After that, an image on
+/// another platform is refused, as for any runtime.
+#[tokio::test]
+async fn a_runtime_of_any_kind_learns_its_platform_from_its_first_hello() {
+    let tmp = TempDir::new().unwrap();
+    let h = Harness::start_with(&tmp, local_only(), Default::default())
+        .await
+        .unwrap();
+    let base = h.tcp_base();
+
+    let r = add(
+        &base,
+        serde_json::json!({"name": "Node runtime 1", "kind": "node", "homecore_url": "http://homecore.local:8080"}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let issued: IssuedKey = r.json().await.unwrap();
+    let key = ConnectionKey::decode(&issued.key).unwrap();
+    assert_eq!(key.kind, "node");
+    assert_eq!(key.abi, "", "the platform is not known until it connects");
+    assert!(key.username.starts_with("plugin.node-"), "{}", key.username);
+
+    let say = |abi: &'static str| {
+        let mut body = hello_body("node");
+        body.capabilities.abi = abi.into();
+        let (base, id, secret) = (base.clone(), key.runtime_id.clone(), key.secret.clone());
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/api/v1/plugin-runtimes/{id}/hello"))
+                .bearer_auth(secret)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(say("glibc_2_28").await, StatusCode::OK);
+    assert_eq!(say("glibc_2_28").await, StatusCode::OK);
+    assert_eq!(say("musl_1_2").await, StatusCode::CONFLICT);
+
+    let kinds: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/api/v1/plugin-runtimes/kinds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(kinds["kinds"], serde_json::json!(["node"]));
+
+    h.stop().await;
+}
+
+/// A plugin placed on a runtime: its config is core's own file, which the
+/// runtime is served. GET used to ask the plugin and hand back its broker
+/// password in clear (the SDK answers with the file as text, which the JSON
+/// redaction had no keys to find in), and PUT went to the plugin's own copy,
+/// which the runtime's next check-in replaced, restarting nothing.
+#[tokio::test]
+async fn a_placed_plugins_config_is_cores_file_redacted_and_written_in_place() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("config/plugins/plugin.matter.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let original = "# set by core\n[homecore]\nplugin_id = \"plugin.matter\"\npassword = \"s3cret-broker-pass\"\n\n[matter]\nlog_level = \"info\"\n";
+    std::fs::write(&file, original).unwrap();
+    let h = Harness::start_seeded(&tmp, local_only(), Default::default(), |store| {
+        store
+            .plugin_runtimes()
+            .place(&hc_state::plugin_runtime_store::PlacementRecord {
+                runtime_id: "rt-00000001".into(),
+                plugin_id: "plugin.matter".into(),
+                version: "0.2.0".into(),
+                artifact_url: "http://example.invalid/a.tar.zst".into(),
+                sha256: "0".repeat(64),
+                config: original.into(),
+                placed_at: chrono::Utc::now(),
+                interpreter: None,
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let url = format!("{}/api/v1/plugins/plugin.matter/config", h.tcp_base());
+    let http = reqwest::Client::new();
+
+    let got: serde_json::Value = http.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["format"], "toml", "{got}");
+    let raw = got["raw"].as_str().unwrap();
+    assert!(
+        !raw.contains("s3cret-broker-pass"),
+        "the broker password leaked: {raw}"
+    );
+    assert!(
+        raw.contains("__redacted__") && raw.contains("# set by core"),
+        "{raw}"
+    );
+
+    // Change a setting the way the editor does; the password it never saw stays.
+    let res = http
+        .put(&url)
+        .json(&serde_json::json!({ "patch": { "matter": { "log_level": "debug" } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(written.contains("log_level = \"debug\""), "{written}");
+    assert!(
+        written.contains("password = \"s3cret-broker-pass\""),
+        "{written}"
+    );
+    assert!(
+        written.contains("# set by core"),
+        "comments are kept: {written}"
+    );
+
+    // The editor's round trip: the redacted text PUT back as raw keeps it too.
+    let res = http
+        .put(&url)
+        .json(&serde_json::json!({ "raw": raw.replace("log_level = \"info\"", "log_level = \"warn\"") }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        written.contains("password = \"s3cret-broker-pass\"")
+            && written.contains("log_level = \"warn\""),
+        "{written}"
+    );
+
+    // Not placed and never registered: still not found.
+    let res = http
+        .get(format!(
+            "{}/api/v1/plugins/plugin.nothing/config",
+            h.tcp_base()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
     h.stop().await;
 }

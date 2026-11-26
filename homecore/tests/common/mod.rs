@@ -50,6 +50,17 @@ impl Harness {
         whitelist: Vec<ipnet::IpNet>,
         runtimes: hc_config::PluginRuntimesSection,
     ) -> Result<Self> {
+        Self::start_seeded(tmp, whitelist, runtimes, |_| {}).await
+    }
+
+    /// Start with `seed` run on the store first: records a test needs that
+    /// only another process (a runtime, a registry install) would make.
+    pub async fn start_seeded(
+        tmp: &TempDir,
+        whitelist: Vec<ipnet::IpNet>,
+        runtimes: hc_config::PluginRuntimesSection,
+        seed: impl FnOnce(&StateStore),
+    ) -> Result<Self> {
         let state_db_path = tmp.path().join("state.redb");
         let history_db_path = tmp.path().join("history.db");
         let jwt_secret_path = jwt_secret::default_secret_path(&state_db_path);
@@ -63,6 +74,7 @@ impl Harness {
             history_db_path.to_str().unwrap(),
         )
         .await?;
+        seed(&store);
 
         let bus = EventBus::new(256);
         let mut params = AppStateParams::new(store, bus, jwt);

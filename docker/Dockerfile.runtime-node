@@ -1,0 +1,88 @@
+# homeCore plugin runtime for Node.js: ghcr.io/homecore-io/hc-runtime-node
+#
+# A runtime is a container the operator runs, which hosts any number of
+# homeCore plugins written for Node.js. homeCore never starts or stops it. An
+# admin adds it in homeCore (Settings, Plugins, Runtimes, Add runtime, Node.js),
+# which shows a connection key once; paste it into the runtime's page on port
+# 8790, or set it as HC_RUNTIME_KEY. homeCore then places plugins on it and the
+# host inside installs, runs and supervises them, one process per plugin. See
+# docs/pluginRuntimesPlan.md.
+#
+# The image is the same as the Python one but for its adapter:
+#
+#   hc-runtime-host   static Rust binary, built in the first stage from this
+#                     repo. The key, its page, fetching and checking
+#                     artifacts, supervision. The same binary for every language.
+#   adapter.toml      the only Node-specific part: how to check and launch a
+#                     plugin.
+#   Debian (glibc)    official Node.js builds need glibc 2.28 and libstdc++.
+#
+# There is no Node here. Each plugin is built for a Node major and placed with
+# that Node from the registry (homeCore-io/interpreters), which the host fetches
+# through homeCore and keeps in the data volume, one copy per version. A plugin
+# arrives with its node_modules, so there is no npm either.
+#
+# Plugins that speak Matter or mDNS need the host's network (IPv6 link-local
+# multicast): run the container with --network host.
+#
+# Build from the core repo root:
+#
+#   docker build -f docker/Dockerfile.runtime-node -t hc-runtime-node .
+#
+# Run, then open http://<this host>:8790 and paste the key:
+#
+#   docker run -d --name nodehost-01 --network host \
+#     -v nodehost-01:/var/lib/hc-runtime \
+#     hc-runtime-node
+#
+# or skip the page with -e HC_RUNTIME_KEY=hcrt1.… . homeCore's broker has to
+# listen on the network; the Runtimes page in homeCore says so and offers to
+# change it.
+
+# ── Stage 1: the host ────────────────────────────────────────────────────────
+# Same toolchain and target as the released plugins: rust 1.100 on alpine, so
+# the binary is static musl and runs on any base below.
+FROM rust:1.100-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS host
+
+RUN apk add --no-cache musl-dev pkgconfig
+
+WORKDIR /src
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p hc-runtime-host && \
+    cp target/release/hc-runtime-host /hc-runtime-host && \
+    strip /hc-runtime-host
+
+# ── Stage 2: the runtime ─────────────────────────────────────────────────────
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+# tini is PID 1: it forwards `docker stop`'s SIGTERM to the host, which stops
+# its plugins before exiting, and reaps anything a plugin leaves behind.
+# ca-certificates for plugins that call cloud APIs; libstdc++6 and libatomic1
+# for Node (26 links libatomic). homeCore-io/interpreters' build-node.sh fails
+# on a Node that needs any other library, so add it here and there together.
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends tini ca-certificates libstdc++6 libatomic1 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=host /hc-runtime-host            /usr/local/bin/hc-runtime-host
+COPY docker/runtime-node/adapter.toml         /etc/hc-runtime/adapter.toml
+COPY docker/entrypoint-runtime.sh             /entrypoint.sh
+
+# What this image can host. The host refuses to start if adapter.toml disagrees.
+# HC_RUNTIME_ARCH is left to the host, which reports the arch it was built for.
+ENV HC_RUNTIME_KIND=node \
+    HC_RUNTIME_ABI=glibc_2_28 \
+    HC_RUNTIME_DATA=/var/lib/hc-runtime \
+    HC_RUNTIME_ADAPTER=/etc/hc-runtime/adapter.toml \
+    NODE_ENV=production
+
+# The runtime's own page: paste the key, see what it hosts.
+EXPOSE 8790
+
+VOLUME ["/var/lib/hc-runtime"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

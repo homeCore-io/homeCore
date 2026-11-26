@@ -128,6 +128,35 @@ launch     = ["{env}/bin/python", "-m", "{entrypoint}", "{config}"]
         assert_eq!(a.abi, "cp312-manylinux_2_28");
     }
 
+    /// Every adapter an image ships loads, and says the kind its directory
+    /// names: `docker/runtime-<kind>/adapter.toml`.
+    #[test]
+    fn the_shipped_adapters_load() {
+        let docker = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docker");
+        let mut seen = Vec::new();
+        for entry in std::fs::read_dir(&docker).unwrap() {
+            let dir = entry.unwrap().path();
+            let Some(kind) = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("runtime-"))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let a = Adapter::load(&dir.join("adapter.toml")).unwrap();
+            assert_eq!(a.kind, kind, "{}", dir.display());
+            assert!(
+                !a.abi.contains('-'),
+                "a platform tag has no dash: {}",
+                a.abi
+            );
+            seen.push(kind);
+        }
+        seen.sort();
+        assert_eq!(seen, ["node", "python"]);
+    }
+
     /// The point of the design: a different language is a different file, not a
     /// different program.
     #[test]

@@ -18,10 +18,11 @@ use serde::{Deserialize, Serialize};
 /// What a runtime can host: the language, the platform its artifacts must be
 /// built for, and its architecture.
 ///
-/// A python runtime brings no Python of its own. Its `abi` is only the platform
-/// tag its image's C library satisfies (`manylinux_2_28`); the interpreter comes
-/// from the registry, chosen per plugin by the series in the plugin's own ABI
-/// tag (`cp313` of `cp313-manylinux_2_28`). See `docs/pythonInterpretersPlan.md`.
+/// A runtime brings no interpreter of its own. Its `abi` is only the platform
+/// tag its image satisfies (`manylinux_2_28` for Python, `glibc_2_28` for
+/// Node); the interpreter comes from the registry, chosen per plugin by the
+/// series in the plugin's own ABI tag (`cp313` of `cp313-manylinux_2_28`). See
+/// `docs/pythonInterpretersPlan.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
     /// e.g. `python`.
@@ -32,13 +33,14 @@ pub struct RuntimeCapabilities {
     pub arch: String,
 }
 
-/// The languages a runtime can be added for, with the platform each runtime
-/// image provides.
-pub const KINDS: &[(&str, &str)] = &[("python", "manylinux_2_28")];
-
-/// The platform homeCore expects of a runtime kind, if it supports that kind.
-pub fn abi_for(kind: &str) -> Option<&'static str> {
-    KINDS.iter().find(|(k, _)| *k == kind).map(|(_, abi)| *abi)
+/// Whether `kind` can name a runtime kind: a lowercase name such as `python`,
+/// `node`, `java` or `dotnet`. homeCore keeps no list of kinds. A kind is what
+/// a runtime image says it hosts and what the registry publishes builds and
+/// interpreters for.
+pub fn valid_kind(kind: &str) -> bool {
+    let mut chars = kind.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 /// The platform part of an ABI tag: `manylinux_2_28` of `cp313-manylinux_2_28`.
@@ -50,12 +52,17 @@ pub fn platform_of(abi: &str) -> &str {
     }
 }
 
-/// The interpreter series an ABI tag names: `cp313` of `cp313-manylinux_2_28`.
-/// None for a bare platform tag.
+/// The interpreter series an ABI tag names: `cp313` of `cp313-manylinux_2_28`,
+/// `node24` of `node24-glibc_2_28`. None for a bare platform tag.
+///
+/// A tag is `<series>-<platform>` or a bare `<platform>`, for every language:
+/// platform tags never contain `-`, so the series is whatever comes before the
+/// first one. What a series means is the registry's business, which lists the
+/// interpreters for it; homeCore only matches the strings.
 pub fn series_of(abi: &str) -> Option<&str> {
-    let (head, _) = abi.split_once('-')?;
-    let digits = head.strip_prefix("cp")?;
-    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(head)
+    let (head, platform) = abi.split_once('-')?;
+    (!head.is_empty() && !platform.is_empty() && head.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then_some(head)
 }
 
 /// The interpreter a placed plugin runs on, as core chose it from the signed
@@ -122,9 +129,9 @@ impl ConnectionKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddRuntimeRequest {
     pub name: String,
-    /// A kind from [`KINDS`]. Defaults to `python`.
-    #[serde(default)]
-    pub kind: Option<String>,
+    /// The language it hosts, as its image names it: `python`, `node`, …
+    /// ([`valid_kind`]). Its platform is learned when it first connects.
+    pub kind: String,
     /// homeCore's address as the runtime will reach it. The app fills it in from
     /// the address it is using; the admin can change it.
     pub homecore_url: String,
@@ -276,9 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn only_supported_kinds_have_an_abi() {
-        assert_eq!(abi_for("python"), Some("manylinux_2_28"));
-        assert_eq!(abi_for("node"), None);
+    fn any_lowercase_name_is_a_kind() {
+        for k in ["python", "node", "java", "dotnet", "deno2"] {
+            assert!(valid_kind(k), "{k}");
+        }
+        for k in ["", "Python", "2node", "node-js", "../x", "node js"] {
+            assert!(!valid_kind(k), "{k}");
+        }
     }
 
     #[test]
@@ -287,7 +298,11 @@ mod tests {
         assert_eq!(platform_of("cp313-manylinux_2_28"), "manylinux_2_28");
         assert_eq!(series_of("manylinux_2_28"), None);
         assert_eq!(platform_of("manylinux_2_28"), "manylinux_2_28");
+        assert_eq!(series_of("node24-glibc_2_28"), Some("node24"));
+        assert_eq!(platform_of("node24-glibc_2_28"), "glibc_2_28");
+        assert_eq!(series_of("java21-glibc_2_28"), Some("java21"));
         assert_eq!(series_of("node22"), None);
-        assert_eq!(series_of("cpx-manylinux_2_28"), None);
+        assert_eq!(series_of("-glibc_2_28"), None);
+        assert_eq!(series_of("node24-"), None);
     }
 }

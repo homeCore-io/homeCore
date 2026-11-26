@@ -182,9 +182,9 @@ jobs:
       version_manifest: crates/hc-cli/Cargo.toml
       archive_kind: tool
 
-  # ── The Python plugin runtime image ───────────────────────────────────────
+  # ── The plugin runtime images ─────────────────────────────────────────────
   #
-  # ghcr.io/homecore-io/hc-runtime-python ships with the server: a core release
+  # ghcr.io/homecore-io/hc-runtime-<kind> ships with the server: a core release
   # is what bumps MIN_HOST_VERSION, so the image a core release points people at
   # is built from the same tag. It is pushed only once the server release itself
   # succeeded.
@@ -192,10 +192,16 @@ jobs:
   # The Dockerfile builds hc-runtime-host in its own first stage from this
   # checkout, so this job needs none of the release job's binaries. amd64 only,
   # like hc-core: ARM is on hold.
-  runtime-python:
-    name: Runtime image (Python)
+  # One image per language, the same host binary in each; only the base and
+  # adapter differ (docker/Dockerfile.runtime-<kind>).
+  runtime:
+    name: Runtime image (${{ matrix.kind }})
     needs: [resolve, core]
     if: needs.resolve.outputs.component == 'core'
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [python, node]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -205,7 +211,7 @@ jobs:
         id: resolve
         run: |
           set -eu
-          BASE="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/hc-runtime-python"
+          BASE="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/hc-runtime-${{ matrix.kind }}"
           if [ "${{ github.event_name }}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF_NAME#v}"
             TAGS=$(printf '%s\n%s' "${BASE}:${TAG}" "${BASE}:latest")
@@ -236,7 +242,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: docker/Dockerfile.runtime-python
+          file: docker/Dockerfile.runtime-${{ matrix.kind }}
           platforms: linux/amd64
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

@@ -1,0 +1,26 @@
+# What a Node.js plugin runtime does, as data. hc-runtime-host knows nothing
+# about Node; it substitutes these placeholders into argv and runs them, with
+# no shell in between. See runtime-host/src/adapter.rs.
+#
+# kind and abi must match what the image says it hosts (HC_RUNTIME_KIND,
+# HC_RUNTIME_ABI in Dockerfile.runtime-node), or the host refuses to start. abi
+# is the platform only: the Node a plugin runs on is the interpreter homeCore
+# placed it with, unpacked at {interpreter}. Official Node.js builds need glibc
+# 2.28 or later, which is what glibc_2_28 promises.
+#
+# A Node plugin's artifact is plugin.toml plus app/, which already holds its
+# node_modules: nothing is installed, downloaded or compiled here.
+
+kind = "node"
+abi  = "glibc_2_28"
+
+# Each install gets its own directory, like every runtime's, though Node
+# needs nothing in it.
+create_env = ["mkdir", "-p", "{env}"]
+
+# Checks the entrypoint parses with the Node it will run on, so a broken
+# artifact fails at install rather than in a restart loop.
+install    = ["{interpreter}/node/bin/node", "--check", "{pkg}/app/{entrypoint}"]
+
+# Every plugin reads its config path from argv[1], whatever its language.
+launch     = ["{interpreter}/node/bin/node", "--enable-source-maps", "{pkg}/app/{entrypoint}", "{config}"]

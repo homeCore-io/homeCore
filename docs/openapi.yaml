@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: homeCore API
-  version: "0.1.123"
+  version: "0.1.124"
   description: |
     homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -5645,6 +5645,12 @@ paths:
         For remote plugins, core issues a `get_config` management RPC over MQTT
         and returns the plugin's reply (its `data` field when present, else the
         whole reply) under `config`, with `format: "remote"`.
+        A plugin placed on a plugin runtime counts as local: its config is
+        core's `config/plugins/<id>.toml`, the file the runtime is served, so
+        it comes back as `format: "toml"` like any other — also before the
+        plugin has first registered. `PUT` writes that file and asks the
+        runtime to check in, and the runtime restarts the plugin on the new
+        text.
 
         **Secrets are redacted.** Values whose key names a credential —
         `password`, `app_key`, `client_secret`, `token`, and similar — come back
@@ -5961,13 +5967,19 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, homecore_url]
+              required: [name, kind, homecore_url]
               properties:
                 name: { type: string, example: Python runtime 1 }
                 kind:
                   type: string
-                  default: python
-                  description: The language it hosts. Only `python` today.
+                  pattern: "^[a-z][a-z0-9]*$"
+                  example: python
+                  description: |
+                    The language it hosts, as its image names it (`python`,
+                    `node`, …). homeCore keeps no list; `GET
+                    /plugin-runtimes/kinds` offers the ones the registry
+                    publishes for. The runtime's platform is learned when it
+                    first connects.
                 homecore_url:
                   type: string
                   example: http://homecore.local:8080
@@ -6105,6 +6117,30 @@ paths:
                     type: boolean
                     description: Whether homeCore can change its own config to open it.
 
+  /plugin-runtimes/kinds:
+    get:
+      operationId: listPluginRuntimeKinds
+      summary: The languages a runtime can be added for
+      description: |
+        homeCore keeps no list of languages. A kind is offered when the signed
+        registry index publishes plugin builds or interpreters for it, or a
+        runtime of that kind is already added.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Kinds, sorted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kinds:
+                    type: array
+                    items: { type: string }
+                    example: [node, python]
+
   /plugin-runtimes/broker/open:
     post:
       operationId: openPluginRuntimeBroker
@@ -6137,9 +6173,10 @@ paths:
         JWT. Records what it runs on and when it was last seen. Its page also
         calls this to test a key before saving it. A runtime whose image hosts a
         different language or platform from what it was added for is refused
-        with `409`, and so is an image that brings its own Python
+        with `409`, and so is an image that brings its own interpreter
         (`capabilities.abi` naming a series, such as `cp312-manylinux_2_28`):
-        plugins now run on the interpreter they are placed with.
+        plugins now run on the interpreter they are placed with. A runtime's
+        first check-in records its platform.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -6177,7 +6214,7 @@ paths:
         "409":
           description: |
             The image hosts a different language or platform, or is older than
-            this homeCore and brings its own Python. The error says which, and
+            this homeCore and brings its own interpreter. The error says which, and
             what to do.
 
   /plugin-runtimes/{id}/placements:
@@ -6259,7 +6296,7 @@ paths:
         - { name: version, in: path, required: true, schema: { type: string, example: 3.13.18 } }
       responses:
         "200":
-          description: The verified `.tar.zst`, with one top directory, `python/`
+          description: The verified `.tar.zst`, with one top directory named for the kind (`python/`, `node/`)
           headers:
             x-hc-sha256:
               schema: { type: string }
@@ -9149,12 +9186,14 @@ components:
         What a runtime can host. A plugin build fits when its kind and arch
         match and the platform part of its ABI tag equals `abi`; the
         interpreter comes from the registry, by the series in the build's tag.
+        An ABI tag is `<series>-<platform>` (`cp313-manylinux_2_28`,
+        `node24-glibc_2_28`) or a bare platform, for every language.
       properties:
         kind: { type: string, example: python }
         abi:
           type: string
           example: manylinux_2_28
-          description: The platform the image provides, without a Python series.
+          description: The platform the image provides, without an interpreter series.
         arch: { type: string, example: x86_64 }
 
     RuntimeConnectionKey:
@@ -9171,7 +9210,10 @@ components:
         username: { type: string, example: plugin.python-rt4f2a9c17 }
         secret: { type: string }
         kind: { type: string, example: python }
-        abi: { type: string, example: manylinux_2_28 }
+        abi:
+          type: string
+          example: manylinux_2_28
+          description: The platform, once the runtime has connected; empty in a key made before then.
 
     IssuedRuntimeKey:
       type: object

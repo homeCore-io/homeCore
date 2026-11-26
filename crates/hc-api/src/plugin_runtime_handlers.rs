@@ -15,8 +15,8 @@ use axum::{
 };
 use chrono::Utc;
 use hc_api_types::plugin_runtimes::{
-    abi_for, platform_of, series_of, AddRuntimeRequest, ConnectionKey, HelloRequest, HelloResponse,
-    IssuedKey, RuntimeSummary, UpdateRuntimeRequest,
+    platform_of, series_of, valid_kind, AddRuntimeRequest, ConnectionKey, HelloRequest,
+    HelloResponse, IssuedKey, RuntimeSummary, UpdateRuntimeRequest,
 };
 use hc_state::plugin_runtime_store::{PlacedInterpreter, RuntimeRecord};
 use serde_json::{json, Value};
@@ -182,18 +182,13 @@ pub async fn add_runtime(
     if name.is_empty() {
         return err(StatusCode::UNPROCESSABLE_ENTITY, "give the runtime a name");
     }
-    let kind = req
-        .kind
-        .as_deref()
-        .unwrap_or("python")
-        .trim()
-        .to_lowercase();
-    let Some(abi) = abi_for(&kind) else {
+    let kind = req.kind.trim().to_lowercase();
+    if !valid_kind(&kind) {
         return err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("homeCore can't host {kind} plugins yet; python is the one it can"),
+            "the kind is the language the runtime hosts, a lowercase name such as python or node",
         );
-    };
+    }
     let homecore_url = match svc::check_homecore_url(&req.homecore_url) {
         Ok(u) => u,
         Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
@@ -210,7 +205,8 @@ pub async fn add_runtime(
         runtime_id: runtime_id.clone(),
         name: name.to_string(),
         kind,
-        abi: abi.to_string(),
+        // The image says its platform when it first connects (`hello`).
+        abi: String::new(),
         plugin_id,
         key_hash: String::new(),
         homecore_url,
@@ -235,6 +231,53 @@ pub async fn add_runtime(
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+/// `GET /plugin-runtimes/kinds`: the languages a runtime can be added for.
+///
+/// homeCore keeps no list. A kind is offered when the signed index publishes
+/// plugin builds or interpreters for it, or a runtime of that kind is already
+/// added; so a new language needs a runtime image and registry entries, not a
+/// homeCore release.
+pub async fn list_kinds(State(state): State<AppState>, _: PluginsWrite) -> impl IntoResponse {
+    let mut kinds: Vec<String> = store(&state)
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+    if let Some(reg) = state.registry.clone() {
+        match reg.index().await {
+            Ok(index) => kinds.extend(index_kinds(&index)),
+            Err(e) => {
+                tracing::warn!(error = %e, "runtime kinds: the registry index is unavailable")
+            }
+        }
+    }
+    kinds.sort_unstable();
+    kinds.dedup();
+    (StatusCode::OK, Json(json!({ "kinds": kinds }))).into_response()
+}
+
+/// The runtime kinds a signed index mentions.
+pub fn index_kinds(index: &crate::registry::RegistryIndex) -> Vec<String> {
+    let mut kinds: Vec<String> = index
+        .interpreters
+        .iter()
+        .map(|i| i.kind.clone())
+        .chain(
+            index
+                .plugins
+                .iter()
+                .flat_map(|p| &p.versions)
+                .flat_map(|v| v.runtime_kinds())
+                .map(str::to_string),
+        )
+        .filter(|k| valid_kind(k))
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
 }
 
 /// `PATCH /plugin-runtimes/{id}`: rename it, or set or clear its plugin limit.
@@ -449,28 +492,33 @@ pub async fn hello(
             "homeCore doesn't know this key: it was reset, or the runtime was removed",
         );
     };
-    // An image that names a Python series brings its own interpreter, which
-    // is how runtimes worked before interpreters came from the registry. It
-    // would ignore the interpreter each plugin is placed with.
+    // An image that names an interpreter series brings its own interpreter,
+    // which is how runtimes worked before interpreters came from the registry.
+    // It would ignore the interpreter each plugin is placed with.
     if series_of(&req.capabilities.abi).is_some() {
         return err(
             StatusCode::CONFLICT,
             format!(
-                "this runtime's image is older than homeCore {}: it brings its own Python ({}). \
+                "this runtime's image is older than homeCore {}: it brings its own interpreter ({}). \
                  Pull the latest hc-runtime-{} image and restart the container",
                 state.homecore_version, req.capabilities.abi, req.capabilities.kind
             ),
         );
     }
+    // A runtime's platform is learned from its first hello; after that, an
+    // image on a different platform is a different runtime.
     if req.capabilities.kind != rec.kind
-        || platform_of(&req.capabilities.abi) != platform_of(&rec.abi)
+        || (!rec.abi.is_empty() && platform_of(&req.capabilities.abi) != platform_of(&rec.abi))
     {
         return err(
             StatusCode::CONFLICT,
             format!(
-                "this runtime was added for {} {}, and this image hosts {} {}",
-                rec.kind,
-                platform_of(&rec.abi),
+                "this runtime was added for {}, and this image hosts {} {}",
+                if rec.abi.is_empty() {
+                    rec.kind.clone()
+                } else {
+                    format!("{} {}", rec.kind, platform_of(&rec.abi))
+                },
                 req.capabilities.kind,
                 req.capabilities.abi
             ),
@@ -557,6 +605,25 @@ pub fn place_on_runtime(
     })?;
     nudge_runtime(state, runtime_id);
     Ok(())
+}
+
+/// A plugin placed on a runtime: core's own copy of its config
+/// (`config/plugins/<id>.toml`, which is what the runtime is served and
+/// restarts the plugin on when it changes) and the runtime it is on.
+///
+/// The plugin's own copy, inside the runtime, is not the config: the next
+/// check-in replaces it with this one. So reading and writing a placed
+/// plugin's config goes here, never through the plugin's set_config.
+pub fn placed_config(state: &AppState, plugin_id: &str) -> Option<(String, String)> {
+    let ctx = state.plugin_install.as_ref()?;
+    let placement = store(state)
+        .all_placements()
+        .ok()?
+        .into_iter()
+        .find(|p| p.plugin_id == plugin_id)?;
+    let path = crate::plugin_config_store::PluginConfigStore::new(ctx.config_plugins_dir.clone())
+        .path_for(plugin_id);
+    Some((path.display().to_string(), placement.runtime_id))
 }
 
 /// Ask a runtime to check in now, so a placement it has just been given (or

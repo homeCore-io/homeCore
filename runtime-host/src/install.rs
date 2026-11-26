@@ -59,6 +59,10 @@ pub struct Installed {
     pub plugin_id: String,
     pub version: String,
     pub env: PathBuf,
+    /// The unpacked artifact.
+    pub pkg: PathBuf,
+    /// The interpreter it was installed for, when there is one.
+    pub interpreter: Option<PathBuf>,
     pub entrypoint: String,
     pub config: PathBuf,
     /// The unpacked UI folder, when the package carries one.
@@ -67,12 +71,21 @@ pub struct Installed {
 
 impl Installed {
     /// Template variables for the adapter's `launch`.
+    ///
+    /// `{pkg}` and `{interpreter}` are here for languages whose environment
+    /// doesn't record its interpreter the way a venv does: a Node plugin is
+    /// launched as `{interpreter}/node/bin/node {pkg}/app/{entrypoint}`.
     pub fn launch_vars(&self) -> HashMap<&'static str, String> {
-        HashMap::from([
+        let mut vars = HashMap::from([
             ("env", self.env.display().to_string()),
+            ("pkg", self.pkg.display().to_string()),
             ("entrypoint", self.entrypoint.clone()),
             ("config", self.config.display().to_string()),
-        ])
+        ]);
+        if let Some(i) = &self.interpreter {
+            vars.insert("interpreter", i.display().to_string());
+        }
+        vars
     }
 
     /// The environment the plugin is started with: where its UI folder is.
@@ -399,6 +412,8 @@ async fn install_into(
         version: version.to_string(),
         env,
         ui_dir: ui_dir(&pkg, &manifest),
+        interpreter: target.interpreter.map(Path::to_path_buf),
+        pkg,
         entrypoint: manifest.entrypoint,
         config: config_path,
     })
@@ -418,9 +433,20 @@ pub fn existing(root: &Path, plugin_id: &str, key: &str) -> Result<Installed> {
         version: manifest.version.clone(),
         env: dir.join("env"),
         ui_dir: ui_dir(&pkg, &manifest),
+        interpreter: recorded_interpreter(root, &dir),
+        pkg,
         entrypoint: manifest.entrypoint,
         config: dir.join("config.toml"),
     })
+}
+
+/// The interpreter a version directory records in `.interpreter`, if it is
+/// still unpacked here.
+fn recorded_interpreter(root: &Path, dir: &Path) -> Option<PathBuf> {
+    let name = std::fs::read_to_string(dir.join(".interpreter")).ok()?;
+    let name = name.trim();
+    check_path_component("interpreter", name).ok()?;
+    Some(root.join("interpreters").join(name)).filter(|d| d.join(".installed").exists())
 }
 
 /// Write the config core sent, if it is not already exactly that.
@@ -653,6 +679,40 @@ package    = "hc-foo"
         assert_eq!(again, installed);
     }
 
+    /// A Node plugin's environment doesn't know its interpreter, so `launch`
+    /// is told it, after a restart too.
+    #[tokio::test]
+    async fn launch_knows_the_package_and_interpreter_after_a_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let interp = install_interpreter(
+            root.path(),
+            "node",
+            "24.11.1",
+            &artifact(&[("node/bin/node", b"#")]),
+        )
+        .unwrap();
+        let a = adapter(&["true", "{env}"], &["true", "{pkg}"]);
+        let target = Target {
+            plugin_id: "plugin.foo",
+            version: "0.2.1",
+            key: "0.2.1+node-24.11.1",
+            interpreter: Some(&interp),
+        };
+        let installed = install_target(root.path(), &a, &target, &foo_artifact(), "")
+            .await
+            .expect("install");
+        let again = existing(root.path(), "plugin.foo", "0.2.1+node-24.11.1").unwrap();
+        assert_eq!(again, installed);
+        let vars = again.launch_vars();
+        assert_eq!(vars["interpreter"], interp.display().to_string());
+        assert!(vars["pkg"].ends_with("pkg"), "{}", vars["pkg"]);
+
+        // An interpreter that has since been removed is not offered.
+        std::fs::remove_dir_all(&interp).unwrap();
+        let gone = existing(root.path(), "plugin.foo", "0.2.1+node-24.11.1").unwrap();
+        assert!(!gone.launch_vars().contains_key("interpreter"));
+    }
+
     /// The whole reason the marker is written last: a half-built environment
     /// that reads as installed produces an import error at launch, a long way
     /// from the install that was interrupted.
@@ -760,6 +820,8 @@ package    = "hc-foo"
             plugin_id: "plugin.foo".into(),
             version: "1.0.0".into(),
             env: pkg.join("env"),
+            pkg: pkg.to_path_buf(),
+            interpreter: None,
             entrypoint: "hc_foo.main".into(),
             config: pkg.join("config.toml"),
             ui_dir: Some(pkg.join("ui")),
