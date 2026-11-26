@@ -137,6 +137,14 @@ const HVAC_MODES: &[&str] = &["off", "heat", "cool", "auto", "fan_only", "dry"];
 const HVAC_ACTIONS: &[&str] = &["idle", "heating", "cooling", "fan", "drying", "off"];
 const MEDIA: &[&str] = &["media_player"];
 const PLAYBACK: &[&str] = &["playing", "paused", "stopped", "idle", "buffering"];
+const AIR_QUALITY: &[&str] = &[
+    "good",
+    "fair",
+    "moderate",
+    "poor",
+    "very_poor",
+    "extremely_poor",
+];
 
 /// Every shared name, in the order a reader meets them.
 pub const TERMS: &[Term] = &[
@@ -205,6 +213,14 @@ pub const TERMS: &[Term] = &[
     ),
     term("occupied", Bool, "Someone is in the area.").replaces(&[was("occupancy", Same)]),
     term("water_detected", Bool, "A leak sensor is wet."),
+    term("smoke", Bool, "A smoke alarm detects smoke now.")
+        .replaces(&[was("smoke_detected", Same)]),
+    term(
+        "co_detected",
+        Bool,
+        "A carbon monoxide alarm detects CO now.",
+    ),
+    term("air_quality", Enum, "Air quality, as the sensor rates it.").options(AIR_QUALITY),
     term(
         "tampered",
         Bool,

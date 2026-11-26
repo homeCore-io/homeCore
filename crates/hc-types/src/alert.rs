@@ -31,6 +31,8 @@ use crate::event::AlertSeverity;
 pub enum AlertKind {
     Wet,
     Smoke,
+    /// Carbon monoxide, from a CO alarm (`co_detected`). Life-safety, as smoke is.
+    CarbonMonoxide,
     Offline,
     Jammed,
     LowBattery,
@@ -46,6 +48,7 @@ impl AlertKind {
         match self {
             AlertKind::Wet => "wet",
             AlertKind::Smoke => "smoke",
+            AlertKind::CarbonMonoxide => "carbon_monoxide",
             AlertKind::Offline => "offline",
             AlertKind::Jammed => "jammed",
             AlertKind::LowBattery => "low_battery",

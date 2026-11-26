@@ -2653,7 +2653,7 @@ paths:
 
         Each trigger lists the sources whose alerts its filter could match:
         `rule:{id}` (a time rule), `kind:{kind}` (homeCore's own: wet, smoke,
-        offline, jammed, low_battery) and `plugin:{plugin_id}/{topic}` (a kind
+        carbon_monoxide, offline, jammed, low_battery) and `plugin:{plugin_id}/{topic}` (a kind
         a plugin declared). It is `waiting` when none of them can raise one
         now: `off` (its time rule turned off, or its plugin kind set not to
         show), `ignored` (someone ignored those alerts) or `deleted` (its time
@@ -9623,7 +9623,7 @@ components:
           description: Stable while the condition lasts — `wet:{device}`, `rule:{rule}:{device}`, `plugin:{plugin}:{topic}:{device}[:{key}]`.
         kind:
           type: string
-          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
+          enum: [wet, smoke, carbon_monoxide, offline, jammed, low_battery, rule, plugin]
         device_id:
           type: string
         rule_id:
@@ -9767,7 +9767,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
+          enum: [wet, smoke, carbon_monoxide, offline, jammed, low_battery, rule, plugin]
         plugin_id:
           type: string
           description: |
@@ -9826,7 +9826,7 @@ components:
           readOnly: true
         kind:
           type: string
-          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
+          enum: [wet, smoke, carbon_monoxide, offline, jammed, low_battery, rule, plugin]
           description: Only this kind; every kind when left out.
         device_id:
           type: string

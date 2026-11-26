@@ -33,9 +33,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 /// homeCore's own kinds, and how serious each is when raised.
-pub const OWN_KINDS: [(AlertKind, AlertSeverity); 5] = [
+pub const OWN_KINDS: [(AlertKind, AlertSeverity); 6] = [
     (AlertKind::Wet, AlertSeverity::Critical),
     (AlertKind::Smoke, AlertSeverity::Critical),
+    (AlertKind::CarbonMonoxide, AlertSeverity::Critical),
     (AlertKind::Offline, AlertSeverity::Warning),
     (AlertKind::Jammed, AlertSeverity::Critical),
     (AlertKind::LowBattery, AlertSeverity::Warning),
@@ -558,7 +559,12 @@ mod tests {
         );
         assert_eq!(
             s.automation(&serious).unwrap().links[0].sources,
-            vec!["kind:wet", "kind:smoke", "kind:jammed"]
+            vec![
+                "kind:wet",
+                "kind:smoke",
+                "kind:carbon_monoxide",
+                "kind:jammed"
+            ]
         );
 
         // One that watches a device, not an alert, isn't an alert's.
