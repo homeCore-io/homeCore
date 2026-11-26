@@ -704,6 +704,13 @@ impl DevicePublisher {
         self.devices.lock().unwrap().enable_persistence(scoped);
     }
 
+    /// Every device this plugin has registered, this run and (with
+    /// persistence) in earlier ones: what [`Self::reconcile_devices`] would
+    /// judge. For a plugin that retires devices by its own rules.
+    pub fn known_devices(&self) -> HashSet<String> {
+        self.devices.lock().unwrap().snapshot()
+    }
+
     /// Reconcile the live device set against everything this plugin
     /// has ever registered (both in-session via `register_device_full`
     /// and across restarts when persistence is enabled).
