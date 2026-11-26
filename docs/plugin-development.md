@@ -585,7 +585,7 @@ point — not the SDKs, which pass slots through.
 | Notices, capability actions (incl. streaming) | ✓ | ✓ | ✓ | ✓ |
 | Alerts (`set_alerts`, alert kinds) | ✓ | ✓ | ✓ | ✓ |
 | Own screens (`with_ui_dir`, `ui_file`) | ✓ | ✓ | ✓ | ✓ |
-| Files to actions (`upload_chunk`) | ✓ | — | — | — |
+| Files to actions (`upload_chunk`) | ✓ | — | ✓ | — |
 | Pictures it keeps (`with_files_dir`, `plugin_file`) | ✓ | — | — | — |
 | Actions answered asynchronously (`with_async_handler`) | ✓ | — | — | — |
 | Other devices' availability (`subscribe_availability`) | ✓ | — | — | — |
@@ -594,7 +594,7 @@ point — not the SDKs, which pass slots through.
 
 | Caller, `requires_role` signed_in | ✓ | ✓ | ✓ | ✓ |
 | Own REST access (`api_scopes`, `api_access`) | ✓ | ✓ | ✓ | ✓ |
-| Released to the Catalog | ✓ | ✓ | — | — |
+| Released to the Catalog | ✓ | ✓ | ✓ | — |
 
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release. Nothing is published to npm, crates.io, PyPI or NuGet yet;
