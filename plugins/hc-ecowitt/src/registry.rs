@@ -143,29 +143,9 @@ impl DeviceRegistry {
         let _ = self.save_cache();
     }
 
-    /// Clean up devices that were registered previously but are no longer seen.
-    #[allow(dead_code)]
-    pub async fn cleanup_stale(&mut self) {
-        let previous = self.load_cache();
-        for stale_id in previous.iter().filter(|id| !self.registered.contains(*id)) {
-            if let Err(e) = self
-                .publisher
-                .unregister_device(&self.plugin_id, stale_id)
-                .await
-            {
-                warn!(device_id = %stale_id, error = %e, "Failed to unregister stale device");
-            } else {
-                info!(device_id = %stale_id, "Unregistered stale device");
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn load_cache(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.cache_path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    /// The devices the gateway has reported since the plugin started.
+    pub fn reported(&self) -> &HashSet<String> {
+        &self.registered
     }
 
     fn save_cache(&self) -> Result<()> {

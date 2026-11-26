@@ -6,6 +6,7 @@ mod id_map;
 mod parser;
 mod poller;
 mod registry;
+mod retire;
 mod schema;
 mod server;
 mod udp_discovery;
@@ -106,13 +107,9 @@ async fn try_start(
 
     let client = PluginClient::connect(sdk_config)
         .await?
-        // SDK persistence so the tracked-device set survives restarts.
-        // Auto-reconcile is intentionally NOT wired up here — Ecowitt
-        // sensor cadence is irregular (battery-out sensors can be quiet
-        // for hours) and a periodic reconcile would risk wiping
-        // legit-but-quiet devices. Use `DELETE /plugins/:id/devices`
-        // to clean up zombies on demand; auto-register-on-first-sight
-        // recreates anything that's still live.
+        // SDK persistence so the tracked-device set survives restarts. Not
+        // reconciled against what reports: a sensor with a flat battery is
+        // silent too. retire.rs asks the gateway what is paired instead.
         .with_device_persistence(published_ids_path(config_path));
     mqtt_log_handle.connect(
         client.mqtt_client(),
@@ -126,6 +123,8 @@ async fn try_start(
     // Cloneable handle for the gateway-device poller — needs to publish
     // alongside the sensor registry from a separate task.
     let gateway_publisher = publisher.clone();
+    // And for retiring devices whose sensors are no longer paired.
+    let retire_publisher = publisher.clone();
 
     // Cached gateway IP for the management custom_handler.
     //
@@ -437,6 +436,38 @@ async fn try_start(
             }
         });
         info!("Gateway-device poller started (300s cadence)");
+    }
+
+    // --- Retire devices whose sensors are no longer paired (retire.rs) ---
+    //
+    // Hourly, the first a quarter of an hour in so the gateway has reported
+    // what it hears. Through the same gateway resolution as the poller above.
+    {
+        let publisher = retire_publisher;
+        let shared = Arc::clone(&shared);
+        let manual_hosts = cfg.ecowitt.manual_hosts.clone();
+        let configured_ip = cfg.ecowitt.gateway_ip.clone();
+        let cache_path = cache_path.clone();
+        let gateway_cache = std::sync::Arc::clone(&gateway_ip);
+        let since_path = unpaired_since_path(config_path);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+            loop {
+                interval.tick().await;
+                let Some(ip) = resolve_gateway_for_poller(
+                    &gateway_cache,
+                    configured_ip.as_deref(),
+                    &manual_hosts,
+                    &cache_path,
+                )
+                .await
+                else {
+                    continue;
+                };
+                retire_unpaired(&publisher, &shared, &ip, &since_path).await;
+            }
+        });
     }
 
     // --- Run HTTP POST receiver (blocks forever) ---
@@ -1437,6 +1468,73 @@ pub async fn http_get_json(url: &str) -> anyhow::Result<serde_json::Value> {
     }
     let v: serde_json::Value = resp.json().await?;
     Ok(v)
+}
+
+/// When each device was first found with no sensor paired behind it, sibling
+/// to config.toml, so a restart doesn't restart the wait.
+fn unpaired_since_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".unpaired-since.json")
+}
+
+/// One check of the gateway's sensor slots, retiring the devices that have
+/// had nothing paired behind them for a day (retire.rs has the rules).
+/// Judges nothing unless both pages answer with a slot list.
+async fn retire_unpaired(
+    publisher: &plugin_sdk_rs::DevicePublisher,
+    shared: &Arc<SharedState>,
+    ip: &str,
+    since_path: &std::path::Path,
+) {
+    let mut pages = Vec::new();
+    for page in 1..=2 {
+        match http_get_json(&format!("http://{ip}/get_sensors_info?page={page}")).await {
+            Ok(v) if v.is_array() => pages.push(v),
+            Ok(_) | Err(_) => {
+                debug!(page, "sensor slots unreadable; retiring nothing this time");
+                return;
+            }
+        }
+    }
+    let Some(slots) = retire::slots(&pages) else {
+        return;
+    };
+    let reported = shared.registry.lock().await.reported().clone();
+    let unbacked = retire::unbacked(
+        &publisher.known_devices(),
+        &reported,
+        &slots,
+        &shared.device_prefix,
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut since = retire::load(since_path);
+    for id in &unbacked {
+        if !since.contains_key(id) {
+            info!(device_id = %id, "No sensor is paired for this device; it is retired if that holds for a day");
+        }
+    }
+    let due = retire::step(&mut since, &unbacked, now);
+    for id in due {
+        match publisher
+            .unregister_device(publisher.plugin_id(), &id)
+            .await
+        {
+            Ok(()) => {
+                info!(device_id = %id, "Retired: no sensor paired for it on the gateway for a day")
+            }
+            Err(e) => {
+                warn!(device_id = %id, error = %e, "Failed to retire device");
+                // Try again next time, without restarting the wait.
+                since.insert(id, now.saturating_sub(retire::GRACE.as_secs()));
+            }
+        }
+    }
+    retire::save(since_path, &since);
 }
 
 /// Path of the cross-restart device-id snapshot, sibling to

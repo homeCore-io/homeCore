@@ -16,6 +16,19 @@ station, the indoor sensor, rain gauges (tipping bucket and piezo), WH31
 thermo-hygrometers, WN34 probes, soil moisture and soil EC, leaf wetness, leak
 detectors, water level, PM2.5, CO2 and lightning.
 
+### When a sensor goes away
+
+A sensor that stops reporting keeps its device: a flat battery looks the same
+as a removed sensor, and the device's room and rules should survive a battery
+change. Once an hour the plugin reads the gateway's list of sensor slots
+(`/get_sensors_info`). It removes a device only when every slot that could feed
+it has had no sensor paired for a whole day, and the device hasn't reported
+since the plugin started. Re-pairing a sensor takes minutes, so it never costs
+the device. The slots it judges are rain (bucket and piezo), lightning, WH31,
+WN34, WN35, leak, PM2.5 and water level. The gateway's own device, the weather
+station and the indoor sensor are never removed, nor is anything the gateway's
+list doesn't show. Remove one of those by hand in Settings → Devices.
+
 ## Names and units
 
 Both ways of hearing the gateway — its upload and the poll — publish **the same
