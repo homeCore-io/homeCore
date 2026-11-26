@@ -67,7 +67,7 @@ async fn a_runtime_is_added_connects_and_is_reset_and_removed() {
     // Adding it makes the login and hands the key back, once.
     let r = add(
         &base,
-        serde_json::json!({"name": "Python runtime 1", "homecore_url": "http://homecore.local:8080"}),
+        serde_json::json!({"name": "Python runtime 1", "kind": "python", "homecore_url": "http://homecore.local:8080"}),
     )
     .await;
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -216,16 +216,16 @@ async fn adding_says_what_is_wrong_with_the_form() {
 
     for (body, says) in [
         (
-            serde_json::json!({"name": " ", "homecore_url": "http://h:8080"}),
+            serde_json::json!({"name": " ", "kind": "python", "homecore_url": "http://h:8080"}),
             "name",
         ),
         (
-            serde_json::json!({"name": "R", "homecore_url": "h:8080"}),
+            serde_json::json!({"name": "R", "kind": "python", "homecore_url": "h:8080"}),
             "http",
         ),
         (
-            serde_json::json!({"name": "R", "kind": "node", "homecore_url": "http://h:8080"}),
-            "python",
+            serde_json::json!({"name": "R", "kind": "Node JS", "homecore_url": "http://h:8080"}),
+            "lowercase",
         ),
     ] {
         let r = add(&base, body).await;
@@ -239,7 +239,7 @@ async fn adding_says_what_is_wrong_with_the_form() {
     let h2 = Harness::start(&tmp2).await.unwrap();
     let r = add(
         &h2.tcp_base(),
-        serde_json::json!({"name": "R", "homecore_url": "http://h:8080"}),
+        serde_json::json!({"name": "R", "kind": "python", "homecore_url": "http://h:8080"}),
     )
     .await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
@@ -276,7 +276,7 @@ async fn a_runtime_can_be_renamed_and_given_a_limit() {
     let http = reqwest::Client::new();
     let issued: IssuedKey = add(
         &base,
-        serde_json::json!({"name": "Pi", "homecore_url": "http://h:8080", "max_plugins": 3}),
+        serde_json::json!({"name": "Pi", "kind": "python", "homecore_url": "http://h:8080", "max_plugins": 3}),
     )
     .await
     .json()
@@ -309,6 +309,61 @@ async fn a_runtime_can_be_renamed_and_given_a_limit() {
     // null clears it.
     let v = set(serde_json::json!({"max_plugins": null})).await;
     assert!(v.get("max_plugins").is_none(), "{v}");
+
+    h.stop().await;
+}
+
+/// homeCore names no language: a runtime of any kind is added, and its first
+/// check-in records the platform its image provides. After that, an image on
+/// another platform is refused, as for any runtime.
+#[tokio::test]
+async fn a_runtime_of_any_kind_learns_its_platform_from_its_first_hello() {
+    let tmp = TempDir::new().unwrap();
+    let h = Harness::start_with(&tmp, local_only(), Default::default())
+        .await
+        .unwrap();
+    let base = h.tcp_base();
+
+    let r = add(
+        &base,
+        serde_json::json!({"name": "Node runtime 1", "kind": "node", "homecore_url": "http://homecore.local:8080"}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let issued: IssuedKey = r.json().await.unwrap();
+    let key = ConnectionKey::decode(&issued.key).unwrap();
+    assert_eq!(key.kind, "node");
+    assert_eq!(key.abi, "", "the platform is not known until it connects");
+    assert!(key.username.starts_with("plugin.node-"), "{}", key.username);
+
+    let say = |abi: &'static str| {
+        let mut body = hello_body("node");
+        body.capabilities.abi = abi.into();
+        let (base, id, secret) = (base.clone(), key.runtime_id.clone(), key.secret.clone());
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/api/v1/plugin-runtimes/{id}/hello"))
+                .bearer_auth(secret)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(say("glibc_2_28").await, StatusCode::OK);
+    assert_eq!(say("glibc_2_28").await, StatusCode::OK);
+    assert_eq!(say("musl_1_2").await, StatusCode::CONFLICT);
+
+    let kinds: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/api/v1/plugin-runtimes/kinds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(kinds["kinds"], serde_json::json!(["node"]));
 
     h.stop().await;
 }

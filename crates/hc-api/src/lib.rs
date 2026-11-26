@@ -1492,6 +1492,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(plugin_runtime_handlers::broker_status),
         )
         .route(
+            "/plugin-runtimes/kinds",
+            get(plugin_runtime_handlers::list_kinds),
+        )
+        .route(
             "/plugin-runtimes/broker/open",
             post(plugin_runtime_handlers::open_broker),
         )

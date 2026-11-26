@@ -117,11 +117,19 @@ pub async fn test_key(shared: &Shared, key: &ConnectionKey) -> anyhow::Result<St
     // Compared by platform: a key made before interpreters came from the
     // registry names the Python it was pinned to (`cp312-manylinux_2_28`), and
     // that Python is no longer the runtime's business.
+    // A key made since homeCore learns a runtime's platform from its first
+    // hello names no platform; then only the kind is checked here, and core
+    // checks the rest.
     let (keyed, here) = (platform_of(&key.abi), platform_of(&caps.abi));
-    if key.kind != caps.kind || keyed != here {
+    if key.kind != caps.kind || (!keyed.is_empty() && keyed != here) {
         anyhow::bail!(
-            "this key is for a {} runtime ({keyed}), and this container hosts {} ({here})",
+            "this key is for a {} runtime{}, and this container hosts {} ({here})",
             key.kind,
+            if keyed.is_empty() {
+                String::new()
+            } else {
+                format!(" ({keyed})")
+            },
             caps.kind,
         );
     }
@@ -303,7 +311,7 @@ select{height:32px;border-radius:8px;border:1px solid var(--line);background:var
     <div class="card" style="padding:14px 20px 6px;gap:0">
       <b style="padding-bottom:6px">Plugins homeCore placed here</b>
       <ul id="plugins"></ul>
-      <p id="noplugins" class="muted small" style="padding:10px 0">None yet. Install a Python plugin from the Catalog in homeCore and it appears here.</p>
+      <p id="noplugins" class="muted small" style="padding:10px 0">None yet. Install a plugin that runs in a runtime from the Catalog in homeCore and it appears here.</p>
       <p class="muted small" style="padding:6px 0 10px">Add and remove plugins in homeCore. This page shows what's here.</p>
     </div>
     <div class="card" style="padding:4px 20px;background:var(--sheet);border-style:dashed">
@@ -346,7 +354,7 @@ function mountForm(where){
 $('newkeybtn').onclick = () => { const n=$('newkey'); const open=n.classList.toggle('hidden')===false; $('newkeybtn').setAttribute('aria-expanded', open); if(open && !n.firstChild) mountForm(n); };
 async function refresh(){
   let s; try { s = await (await fetch('api/status')).json(); } catch(e){ return; }
-  text($('what'), (s.kind==='python'?'Python 3.12':s.kind)+' · '+s.arch+' · this container');
+  text($('what'), ({python:'Python',node:'Node.js'}[s.kind]||s.kind)+' · '+s.arch+' · this container');
   const labels = {not_connected:'Not connected',connecting:'Connecting',connected:'Connected',problem:'Not connected'};
   $('pill').className = 'pill '+s.state; text($('pilltext'), labels[s.state]||s.state);
   const p = $('problem'); if(s.message){ text(p, s.message); p.classList.remove('hidden'); } else p.classList.add('hidden');

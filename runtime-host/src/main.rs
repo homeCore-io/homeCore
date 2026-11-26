@@ -90,15 +90,16 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// What this image can host.
+/// What this image can host: its adapter's kind and platform, unless the image
+/// sets `HC_RUNTIME_KIND` / `HC_RUNTIME_ABI`, which must then agree with it.
 ///
 /// Baked in at build time rather than discovered, because the key names what
-/// the runtime was added for: a runtime that guessed its own ABI wrong would be
-/// handed wheels that cannot import.
-fn capabilities() -> RuntimeCapabilities {
+/// the runtime was added for: a runtime that guessed its own platform wrong
+/// would be handed builds that cannot run.
+fn capabilities(adapter: &adapter::Adapter) -> RuntimeCapabilities {
     RuntimeCapabilities {
-        kind: env_or("HC_RUNTIME_KIND", "python"),
-        abi: platform_abi(&env_or("HC_RUNTIME_ABI", "manylinux_2_28")),
+        kind: env_or("HC_RUNTIME_KIND", &adapter.kind),
+        abi: platform_abi(&env_or("HC_RUNTIME_ABI", &adapter.abi)),
         arch: env_or("HC_RUNTIME_ARCH", std::env::consts::ARCH),
     }
 }
@@ -116,7 +117,7 @@ fn platform_abi(raw: &str) -> String {
         tracing::warn!(
             set = raw,
             using = platform,
-            "HC_RUNTIME_ABI still names a Python, left over from an older image; \
+            "HC_RUNTIME_ABI still names an interpreter, left over from an older image; \
              using the platform alone. Remove HC_RUNTIME_ABI from the container's settings"
         );
     }
@@ -137,14 +138,13 @@ async fn main() -> Result<()> {
         .init();
 
     let data_dir = PathBuf::from(env_or("HC_RUNTIME_DATA", "/var/lib/hc-runtime"));
-    let caps = capabilities();
-
     // Everything language-specific, and the only reason this binary can host
-    // Python without knowing anything about it. Loaded first: an image shipped
-    // without an adapter cannot host anything, and finding that out at startup
-    // beats finding out the first time something is placed here.
+    // any language without knowing anything about it. Loaded first: an image
+    // shipped without an adapter cannot host anything, and finding that out at
+    // startup beats finding out the first time something is placed here.
     let adapter_path = PathBuf::from(env_or("HC_RUNTIME_ADAPTER", "/etc/hc-runtime/adapter.toml"));
     let adapter = adapter::Adapter::load(&adapter_path)?;
+    let caps = capabilities(&adapter);
     if adapter.kind != caps.kind || adapter.abi != caps.abi {
         anyhow::bail!(
             "this image says it hosts {} {} but its adapter is {} {}",
