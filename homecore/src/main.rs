@@ -15,10 +15,6 @@ use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::NotificationService;
 use hc_state::StateStore;
-use hc_topic_map::{
-    loader::{load_profiles_from_dir, load_transforms_from_dir},
-    DeviceTypeRegistry, EcosystemRouter,
-};
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -783,48 +779,14 @@ async fn main() -> Result<()> {
     .with_management_responses(management_responses.clone())
     .with_alert_channel(config.alerts.notify_channel.clone());
 
-    let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
-    let mut type_catalog: Option<Arc<DeviceTypeRegistry>> = None;
-    match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
-        Ok(registry) => {
-            let count = registry.type_names().count();
-            info!(path = %device_types_path.display(), count, "Device type registry loaded");
-            let registry = Arc::new(registry);
-            type_catalog = Some(Arc::clone(&registry));
-            core = core.with_device_types(registry);
-        }
-        Err(_e) if !device_types_path.exists() => {
-            info!(path = %device_types_path.display(), "No device type registry found; typed devices will not have auto schemas");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, path = %device_types_path.display(), "Could not load device type registry")
-        }
-    }
-
-    // Load ecosystem profiles and build the router.  Done before spawning the
-    // MQTT client so add_subscription("#") runs first.
-    // Transforms are every `*.rhai` file beside the profiles; a script that
-    // doesn't compile is skipped, as a profile that doesn't parse is.
-    match load_profiles_from_dir(&config.profiles.dir) {
-        Ok(profiles) if !profiles.is_empty() => {
-            let scripts = load_transforms_from_dir(&config.profiles.dir);
-            let router = EcosystemRouter::with_scripts(profiles, &scripts);
-            warn_about_profile_device_types(&router, type_catalog.as_deref(), &device_types_path);
-            mqtt_client.add_subscription("#");
-            info!(
-                scripts = scripts.len(),
-                "Ecosystem router ready; subscribed to all topics (#)"
-            );
-            core = core.with_router(router);
-        }
-        Ok(_) => info!(
-            "No ecosystem profiles found in {}; running without router",
-            config.profiles.dir
-        ),
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not load profiles directory; running without router")
-        }
-    }
+    // Ecosystem profiles: the folder of profiles, the device type catalog and
+    // transforms, which the app can change while homeCore runs. Core hears
+    // every topic on the broker, so that a profile turned on later takes its
+    // devices in, and so the app can show what the broker carries that no
+    // profile takes in.
+    let profile_set = hc_core::profiles::ProfileSet::load(&config.profiles.dir);
+    mqtt_client.add_subscription("#");
+    core = core.with_profiles(Arc::clone(&profile_set));
 
     // ── 13. MQTT forwarder → internal bus ──────────────────────────────────
     // Only MqttMessage events flow through here; typed events go to pub_bus.
@@ -1328,6 +1290,7 @@ async fn main() -> Result<()> {
         app_state
     }
     .with_backup_paths(backup_paths)
+    .with_profiles(Arc::clone(&profile_set))
     .with_fire_history(fire_history)
     .with_hub_vars(hub_vars)
     .with_pauses(pauses)
@@ -1572,46 +1535,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Say once, at startup, when a profile names a device type the catalog
-/// can't give a schema for. Its devices would get the type and no schema, so
-/// no controls in the app, and nothing else would say why.
-fn warn_about_profile_device_types(
-    router: &EcosystemRouter,
-    catalog: Option<&DeviceTypeRegistry>,
-    catalog_path: &Path,
-) {
-    let named = router.device_types_named();
-    if named.is_empty() {
-        return;
-    }
-    let Some(catalog) = catalog else {
-        tracing::warn!(
-            types = %named.join(", "),
-            path = %catalog_path.display(),
-            "Ecosystem profiles name device types, but there is no device type catalog, so \
-             their devices get no schema and no controls in the app. Copy device-types.toml \
-             from config/profiles/examples into the profiles folder."
-        );
-        return;
-    };
-    let unknown: Vec<String> = named
-        .into_iter()
-        .filter(|t| {
-            catalog
-                .get_device_schema(&hc_topic_map::canonical_device_type_name(t))
-                .is_none()
-        })
-        .collect();
-    if !unknown.is_empty() {
-        tracing::warn!(
-            types = %unknown.join(", "),
-            path = %catalog_path.display(),
-            "Ecosystem profiles name device types the catalog doesn't have; their devices \
-             get no schema"
-        );
-    }
 }
 
 #[cfg(test)]

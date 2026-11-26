@@ -97,3 +97,52 @@ pub fn load_transforms_from_dir(dir: &str) -> Vec<(String, String)> {
         })
         .collect()
 }
+
+/// One profile file in a directory, read: its text, and the profile or why
+/// it didn't load.
+#[derive(Debug)]
+pub struct ProfileRead {
+    /// The file's name, e.g. `tasmota.toml`.
+    pub file: String,
+    pub text: String,
+    /// The profile, or what is wrong with the file, said as TOML says it
+    /// (with the line and column).
+    pub result: std::result::Result<EcosystemProfile, String>,
+}
+
+/// Every `*.toml` profile file in `dir` except `device-types.toml`, sorted by
+/// name, each with the profile or the reason it didn't load. Unlike
+/// [`load_profiles_from_dir`], a file that doesn't parse is kept, with its
+/// error, so the person can be shown what is wrong.
+pub fn read_profiles_from_dir(dir: &str) -> Result<Vec<ProfileRead>> {
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("Cannot read profiles directory: {dir}"))?;
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("device-types.toml"))
+        .collect();
+    paths.sort();
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let result = toml::from_str::<ProfileFile>(&text)
+                        .map(|f| f.ecosystem)
+                        .map_err(|e| e.to_string());
+                    ProfileRead { file, text, result }
+                }
+                Err(e) => ProfileRead {
+                    file,
+                    text: String::new(),
+                    result: Err(format!("can't be read: {e}")),
+                },
+            }
+        })
+        .collect())
+}

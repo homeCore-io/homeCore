@@ -25,6 +25,8 @@ use tracing::{debug, info, warn};
 pub enum InboundResult {
     /// A state update — write to `homecore/devices/{device_id}/state[/partial]`.
     State {
+        /// The profile (its `name`) that matched.
+        profile: Arc<str>,
         device_id: String,
         payload: Value,
         /// True → publish to `.../state/partial` (merge-patch).
@@ -35,7 +37,12 @@ pub enum InboundResult {
         device: Option<DeviceConfig>,
     },
     /// An availability update — set `device.available`.
-    Availability { device_id: String, available: bool },
+    Availability {
+        /// The profile (its `name`) that matched.
+        profile: Arc<str>,
+        device_id: String,
+        available: bool,
+    },
 }
 
 /// What the router produces for an outbound homeCore cmd.
@@ -52,6 +59,7 @@ pub struct OutboundResult {
 struct CompiledState {
     segments: Vec<Segment>,
     profile_prefix: String,
+    profile_name: Arc<str>,
     /// The profile's per-device table, shared by its state topics.
     devices: Arc<HashMap<String, DeviceConfig>>,
     config: StateTopicConfig,
@@ -60,6 +68,7 @@ struct CompiledState {
 struct CompiledAvailability {
     segments: Vec<Segment>,
     profile_prefix: String,
+    profile_name: Arc<str>,
     config: AvailabilityTopicConfig,
 }
 
@@ -149,6 +158,25 @@ impl EcosystemRouter {
         router
     }
 
+    /// Every device a loaded profile describes by ID in its
+    /// `[ecosystem.devices]` table, with the profile it is in, once each.
+    pub fn configured_devices(&self) -> Vec<(Arc<str>, String, DeviceConfig)> {
+        let mut out: Vec<(Arc<str>, String, DeviceConfig)> = Vec::new();
+        let mut seen: Vec<*const HashMap<String, DeviceConfig>> = Vec::new();
+        for e in &self.state_entries {
+            let table = Arc::as_ptr(&e.devices);
+            if seen.contains(&table) {
+                continue;
+            }
+            seen.push(table);
+            for (id, d) in e.devices.iter() {
+                out.push((Arc::clone(&e.profile_name), id.clone(), d.clone()));
+            }
+        }
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
     /// Every device type a loaded profile names, on a topic or for one device,
     /// sorted and once each.
     pub fn device_types_named(&self) -> Vec<String> {
@@ -202,12 +230,14 @@ impl EcosystemRouter {
         for profile in profiles {
             let prefix = profile.prefix.clone();
             let devices = Arc::new(profile.devices);
+            let profile_name: Arc<str> = Arc::from(profile.name.as_str());
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
                     segments: parse_pattern(&sc.pattern),
                     profile_prefix: prefix.clone(),
                     devices: Arc::clone(&devices),
+                    profile_name: Arc::clone(&profile_name),
                     config: sc,
                 });
             }
@@ -215,6 +245,7 @@ impl EcosystemRouter {
                 availability_entries.push(CompiledAvailability {
                     segments: parse_pattern(&ac.pattern),
                     profile_prefix: prefix.clone(),
+                    profile_name: Arc::clone(&profile_name),
                     config: ac,
                 });
             }
@@ -259,9 +290,7 @@ impl EcosystemRouter {
         // Try availability topics.
         for entry in &self.availability_entries {
             if let Some(vars) = match_segments(&entry.segments, topic) {
-                if let Some(result) =
-                    self.apply_availability(&entry.config, &entry.profile_prefix, &vars, payload)?
-                {
+                if let Some(result) = self.apply_availability(entry, &vars, payload)? {
                     debug!(%topic, "Availability topic matched");
                     return Ok(Some(result));
                 }
@@ -327,6 +356,7 @@ impl EcosystemRouter {
             let mut obj = Map::new();
             obj.insert(attr_name, json_value);
             return Ok(InboundResult::State {
+                profile: Arc::clone(&entry.profile_name),
                 device_id,
                 payload: Value::Object(obj),
                 partial: true, // scalar topics are always partial updates
@@ -344,6 +374,7 @@ impl EcosystemRouter {
         let partial = config.partial.unwrap_or(config.attribute.is_some());
 
         Ok(InboundResult::State {
+            profile: Arc::clone(&entry.profile_name),
             device_id,
             payload: mapped,
             partial,
@@ -353,11 +384,12 @@ impl EcosystemRouter {
 
     fn apply_availability(
         &self,
-        config: &AvailabilityTopicConfig,
-        prefix: &str,
+        entry: &CompiledAvailability,
         vars: &HashMap<String, String>,
         raw_payload: &[u8],
     ) -> Result<Option<InboundResult>> {
+        let config = &entry.config;
+        let prefix = entry.profile_prefix.as_str();
         let device_var = vars
             .get("device")
             .or_else(|| vars.get("nodeId"))
@@ -396,6 +428,7 @@ impl EcosystemRouter {
         };
 
         Ok(Some(InboundResult::Availability {
+            profile: Arc::clone(&entry.profile_name),
             device_id,
             available,
         }))
@@ -829,6 +862,7 @@ attribute = "on"
             InboundResult::Availability {
                 device_id,
                 available,
+                ..
             } => {
                 assert_eq!(device_id, "zigbee_living_room_light");
                 assert!(available);

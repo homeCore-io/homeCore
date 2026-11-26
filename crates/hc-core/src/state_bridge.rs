@@ -49,6 +49,9 @@ pub struct StateBridge {
     router: Option<Arc<EcosystemRouter>>,
     publish: Option<PublishHandle>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
+    /// The profiles in use, when they can change while homeCore runs. Then
+    /// the router and the catalog come from here, not the two fields above.
+    profiles: Option<Arc<crate::profiles::ProfileSet>>,
     pending_command_changes: DashMap<String, DeviceChange>,
     /// Track which plugins have already emitted a PluginRegistered event
     /// this session, so we only emit once per plugin (not once per device).
@@ -84,6 +87,7 @@ impl StateBridge {
             store,
             router: None,
             publish: None,
+            profiles: None,
             device_types: None,
             pending_command_changes: DashMap::new(),
             registered_plugins: Mutex::new(HashSet::new()),
@@ -125,6 +129,28 @@ impl StateBridge {
         self
     }
 
+    /// Take the router and catalog from a set that can change while homeCore
+    /// runs, and record what it needs to know (unmatched topics, which
+    /// profile a device came through, suggestions).
+    pub fn with_profiles(mut self, profiles: Arc<crate::profiles::ProfileSet>) -> Self {
+        self.profiles = Some(profiles);
+        self
+    }
+
+    fn router(&self) -> Option<Arc<EcosystemRouter>> {
+        match &self.profiles {
+            Some(p) => p.router(),
+            None => self.router.clone(),
+        }
+    }
+
+    fn device_types(&self) -> Option<Arc<DeviceTypeRegistry>> {
+        match &self.profiles {
+            Some(p) => p.catalog(),
+            None => self.device_types.clone(),
+        }
+    }
+
     /// Attach the log stream broadcast channel so plugin logs received over
     /// MQTT are injected into the core's `/logs/stream` WebSocket.
     pub fn with_log_stream(
@@ -140,9 +166,22 @@ impl StateBridge {
     /// Drive the bridge until the event bus closes. Spawn in a `tokio::task`.
     pub async fn run(self) {
         let mut rx = self.bus.subscribe();
+        let mut profile_changes = self.profiles.as_ref().map(|p| p.subscribe());
         info!("State bridge started");
         loop {
-            match rx.recv().await {
+            let received = tokio::select! {
+                r = rx.recv() => r,
+                Some(()) = async {
+                    match profile_changes.as_mut() {
+                        Some(c) => c.changed().await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.profiles_changed().await;
+                    continue;
+                }
+            };
+            match received {
                 Ok(Event::MqttMessage { topic, payload, .. }) => {
                     if let Err(e) = self.handle_mqtt(&topic, &payload).await {
                         warn!(topic, error = %e, "State bridge error");
@@ -163,8 +202,9 @@ impl StateBridge {
         }
 
         // --- Outbound: relay mapped cmd topics to native device topics ---
+        let router = self.router();
         if topic.starts_with("homecore/devices/") && topic.ends_with("/cmd") {
-            if let Some(router) = &self.router {
+            if let Some(router) = &router {
                 match router.route_outbound(topic, payload) {
                     Ok(Some(results)) => {
                         for result in results {
@@ -188,14 +228,21 @@ impl StateBridge {
         }
 
         // --- Inbound: try ecosystem router first ---
-        if let Some(router) = &self.router {
+        if let Some(p) = &self.profiles {
+            p.observe(topic, payload);
+        }
+        if let Some(router) = &router {
             match router.route_inbound(topic, payload) {
                 Ok(Some(InboundResult::State {
+                    profile,
                     device_id,
                     payload: json_payload,
                     partial,
                     device,
                 })) => {
+                    if let Some(p) = &self.profiles {
+                        p.came_through(&device_id, &profile);
+                    }
                     if let Some(described) = device {
                         if let Err(e) = self.describe_profile_device(&device_id, &described).await {
                             warn!(device_id, error = %e, "Could not register a profile device");
@@ -204,9 +251,13 @@ impl StateBridge {
                     return self.handle_state(&device_id, &json_payload, partial).await;
                 }
                 Ok(Some(InboundResult::Availability {
+                    profile,
                     device_id,
                     available,
                 })) => {
+                    if let Some(p) = &self.profiles {
+                        p.came_through(&device_id, &profile);
+                    }
                     return self.handle_availability(&device_id, available).await;
                 }
                 Ok(None) => {
@@ -214,8 +265,17 @@ impl StateBridge {
                         topic,
                         "No ecosystem profile match — falling through to canonical handling"
                     );
+                    if let Some(p) = &self.profiles {
+                        p.heard_unmatched(topic, payload);
+                    }
                 }
                 Err(e) => warn!(topic, error = %e, "Inbound router error"),
+            }
+        }
+
+        if router.is_none() {
+            if let Some(p) = &self.profiles {
+                p.heard_unmatched(topic, payload);
             }
         }
 
@@ -734,6 +794,28 @@ impl StateBridge {
     ///
     /// Once per device per session while the description holds, and only when
     /// the stored device differs from it: a profile device reports often.
+    /// The profiles changed (someone said what a device is, or turned a
+    /// profile on). Forget what was described, and apply what the profiles
+    /// now say about named devices to those that exist, so a change made in
+    /// the app shows at once instead of on the device's next report.
+    async fn profiles_changed(&self) {
+        self.described_profile_devices.lock().unwrap().clear();
+        let Some(router) = self.router() else {
+            return;
+        };
+        for (_, device_id, described) in router.configured_devices() {
+            match self.store.get_device(&device_id).await {
+                Ok(Some(_)) => {
+                    if let Err(e) = self.describe_profile_device(&device_id, &described).await {
+                        warn!(device_id, error = %e, "Could not register a profile device");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!(device_id, error = %e, "Could not read a profile device"),
+            }
+        }
+    }
+
     async fn describe_profile_device(
         &self,
         device_id: &str,
@@ -947,7 +1029,7 @@ impl StateBridge {
         }
 
         if let Some(device_type) = device_type.as_deref() {
-            if let Some(registry) = &self.device_types {
+            if let Some(registry) = &self.device_types() {
                 match registry.get_device_schema(device_type) {
                     Some(schema) => {
                         self.store.upsert_device_schema(device_id, &schema).await?;
@@ -2023,6 +2105,67 @@ mod profile_device_tests {
             .await
             .unwrap();
         assert!(store.get_device("tasmota_kitchen").await.unwrap().is_none());
+    }
+
+    /// Saying what a device is from the app applies at once, to a device that
+    /// already exists, without waiting for it to report again; and a topic
+    /// no profile takes in is kept for the app to show.
+    #[tokio::test]
+    async fn a_change_from_the_app_applies_without_the_device_reporting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugs.toml"),
+            "[ecosystem]\nname = \"plugs\"\nprefix = \"plug_\"\n\n\
+             [[ecosystem.state_topics]]\npattern = \"plugs/{device}/power\"\nattribute = \"on\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("device-types.toml"), SWITCH_TYPE).unwrap();
+        let set = crate::profiles::ProfileSet::load(dir.path());
+
+        let db = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &db.path().join("s.redb").to_string_lossy(),
+            &db.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let bridge = StateBridge::new(EventBus::new(64), EventBus::new(64), store.clone())
+            .with_profiles(Arc::clone(&set));
+
+        bridge
+            .handle_mqtt("plugs/kettle/power", b"true")
+            .await
+            .unwrap();
+        let kettle = store.get_device("plug_kettle").await.unwrap().unwrap();
+        assert_eq!(kettle.device_type, None);
+        assert_eq!(set.profile_of("plug_kettle").as_deref(), Some("plugs"));
+
+        set.set_devices(
+            "plugs",
+            &[crate::profiles::DeviceEntryChange {
+                device_id: "plug_kettle".into(),
+                device_type: Some("switch".into()),
+                name: Some("Kettle".into()),
+            }],
+        )
+        .unwrap();
+        bridge.profiles_changed().await;
+        let kettle = store.get_device("plug_kettle").await.unwrap().unwrap();
+        assert_eq!(kettle.device_type.as_deref(), Some("switch"));
+        assert_eq!(kettle.name, "Kettle");
+        assert!(store
+            .get_device_schema("plug_kettle")
+            .await
+            .unwrap()
+            .is_some());
+
+        bridge
+            .handle_mqtt("esphome/garage/state", b"closed")
+            .await
+            .unwrap();
+        let heard = set.heard_since(Utc::now() - chrono::Duration::minutes(5));
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].topic, "esphome/garage/state");
     }
 }
 

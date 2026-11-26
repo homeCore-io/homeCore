@@ -331,6 +331,7 @@ fn gen1_availability_online() {
         InboundResult::Availability {
             device_id,
             available,
+            ..
         } => {
             assert_eq!(device_id, "shelly_shellyplug-s-AABBCC");
             assert!(available);
@@ -598,6 +599,7 @@ fn gen2_availability_online() {
         InboundResult::Availability {
             device_id,
             available,
+            ..
         } => {
             assert_eq!(device_id, "shelly_shellyplus2pm-083AF2123456");
             assert!(available);

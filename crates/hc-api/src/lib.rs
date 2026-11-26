@@ -54,6 +54,7 @@ pub mod plugin_config_watcher;
 pub mod plugin_install;
 pub mod plugin_runtime_handlers;
 pub mod plugin_runtimes;
+pub mod profile_handlers;
 pub mod rate_limit;
 pub mod registry;
 pub mod room_lights_handlers;
@@ -449,6 +450,9 @@ pub struct AppState {
     /// enable/disable toggle persists via this). `None` if hc-core
     /// was started in a way that didn't surface a config path.
     pub homecore_config_path: Option<Arc<std::path::PathBuf>>,
+    /// The ecosystem profiles, for Settings › Devices over MQTT. `None` when
+    /// homeCore was started without them (tests).
+    pub profiles: Option<Arc<hc_core::profiles::ProfileSet>>,
     /// Sender on the graceful-shutdown channel. Held by AppState so
     /// the `POST /system/restart` handler can request a clean exit;
     /// the runtime supervisor (systemd / docker / hand-rolled) is
@@ -940,6 +944,7 @@ impl AppState {
             alerts: None,
             unit_conversions: Default::default(),
             homecore_config_path: None,
+            profiles: None,
             shutdown_tx: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1078,6 +1083,12 @@ impl AppState {
     /// Attach the homecore.toml path so handlers can write runtime
     /// changes back to disk (currently used by the plugin
     /// enable/disable toggle in PATCH /plugins/{id}).
+    /// The ecosystem profiles the app manages.
+    pub fn with_profiles(mut self, profiles: Arc<hc_core::profiles::ProfileSet>) -> Self {
+        self.profiles = Some(profiles);
+        self
+    }
+
     pub fn with_homecore_config_path(mut self, path: std::path::PathBuf) -> Self {
         self.homecore_config_path = Some(Arc::new(path));
         self
@@ -1297,6 +1308,16 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         // Must stay ahead of `/devices/:id` so "orphaned" is not read as an id.
         .route("/devices/orphaned", get(handlers::orphaned_devices))
+        // Devices over MQTT: the ecosystem profiles (admin only).
+        .route("/mqtt", get(profile_handlers::overview))
+        .route("/mqtt/profiles/{name}", get(profile_handlers::profile))
+        .route(
+            "/mqtt/profiles/{name}/devices",
+            patch(profile_handlers::set_devices),
+        )
+        .route("/mqtt/device-types", get(profile_handlers::device_types))
+        .route("/mqtt/catalog", post(profile_handlers::add_catalog))
+        .route("/mqtt/reload", post(profile_handlers::reload))
         .route("/devices/removed", get(handlers::list_removed_devices))
         .route("/devices/removed/{id}", delete(handlers::bring_back_device))
         .route(

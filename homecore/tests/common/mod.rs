@@ -87,7 +87,11 @@ impl Harness {
                 broker_host: "127.0.0.1".into(),
                 broker_port: 1883,
             }))
-            .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]));
+            .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]))
+            // A profiles folder of its own; empty unless the test writes one.
+            .with_profiles(hc_core::profiles::ProfileSet::load(
+                tmp.path().join("profiles"),
+            ));
 
         let tcp_port = free_port();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

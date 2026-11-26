@@ -50,7 +50,7 @@ pub struct EcosystemProfile {
 
 /// What one device is: its type, which gives it a schema from the device type
 /// catalog, and the name homeCore shows for it.
-#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default, PartialEq, Eq)]
 pub struct DeviceConfig {
     pub device_type: Option<String>,
     pub name: Option<String>,

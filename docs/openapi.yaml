@@ -51,6 +51,8 @@ servers:
 tags:
   - name: auth
     description: Login, user profile, and user management (admin only)
+  - name: mqtt
+    description: Devices over MQTT, the ecosystem profiles (admin only)
   - name: devices
     description: Device registry and state control
   - name: areas
@@ -5036,6 +5038,142 @@ paths:
 
 # =============================================================================
 
+  /mqtt:
+    get:
+      operationId: mqttOverview
+      summary: Devices over MQTT, at a glance
+      description: |
+        The ecosystem profiles (0.1.126): each profile file in the profiles
+        folder, whether it loaded (and why not), how many devices it takes in
+        and how many have no type; the shipped profiles that are off; whether
+        the device type catalog is there; and the topics on the broker in the
+        last hour that no profile took in, each with the shipped profile that
+        would. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The profiles and what the broker carries
+          content:
+            application/json:
+              schema:
+                type: object
+        "403":
+          description: Not an admin
+        "503":
+          description: homeCore has no profiles folder
+  /mqtt/profiles/{name}:
+    get:
+      operationId: getMqttProfile
+      summary: One profile and the devices it takes in
+      description: |
+        The profile's state, and each device it takes in: its name and type,
+        what the profile says it is (`configured`), what its ecosystem says
+        it is (`suggestion`, from Zigbee2MQTT's device list), and a few of
+        its readings. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The profile and its devices
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: No profile of that name
+  /mqtt/profiles/{name}/devices:
+    patch:
+      operationId: setMqttProfileDevices
+      summary: Say what devices are
+      description: |
+        Sets each device's `device_type` and `name` in the profile's
+        `[ecosystem.devices]` table, keeping the rest of the file (comments
+        too), and applies it at once: the device is registered with that type
+        and gets its schema from the catalog. A change with neither removes
+        the device's entry. A type the catalog doesn't have changes nothing.
+        Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changes]
+              properties:
+                changes:
+                  type: array
+                  items:
+                    type: object
+                    required: [device_id]
+                    properties:
+                      device_id:
+                        type: string
+                      device_type:
+                        type: string
+                        nullable: true
+                      name:
+                        type: string
+                        nullable: true
+      responses:
+        "200":
+          description: Saved and applied
+        "400":
+          description: A change that can't be made, said why
+  /mqtt/device-types:
+    get:
+      operationId: listMqttDeviceTypes
+      summary: The device type catalog's types
+      description: Each type with its description and attributes (and which are writable), for choosing a device's type. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The types
+          content:
+            application/json:
+              schema:
+                type: object
+  /mqtt/catalog:
+    post:
+      operationId: addMqttCatalog
+      summary: Add homeCore's device type catalog
+      description: Writes the catalog homeCore ships into the profiles folder when it has none, and applies it. `added` is false when one was there. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Done
+  /mqtt/reload:
+    post:
+      operationId: reloadMqttProfiles
+      summary: Read the profiles folder again
+      description: For a change made to the files by hand. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Done
   /devices/removed:
     get:
       operationId: listRemovedDevices
