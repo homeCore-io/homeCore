@@ -35,6 +35,11 @@ pub enum Audience {
     /// `GET /plugins/{id}/capabilities` requires; only the plugin's own
     /// screens (`ui`) to `devices:read`, which `GET /plugins/ui` requires.
     PluginManifest,
+    /// `device_command_sent`: whole to whoever may command devices; to
+    /// `devices:read` with the command's secrets masked. A rule that sets a
+    /// lock's code sends it in a command, and seeing the house is not
+    /// knowing its codes.
+    DeviceCommand,
     /// Admins only.
     Admin,
 }
@@ -46,6 +51,8 @@ pub enum View {
     Whole,
     /// A `plugin_capabilities` reduced to its plugin id and screens.
     PluginUi,
+    /// A `device_command_sent` with its command's secrets masked.
+    CommandMasked,
     /// None of it.
     Nothing,
 }
@@ -72,9 +79,10 @@ pub fn audience(event: &Event) -> Audience {
         | Event::DeviceSchemaChanged { .. }
         | Event::DeviceBatteryLow { .. }
         | Event::DeviceBatteryRecovered { .. }
-        | Event::DeviceCommandSent { .. }
         | Event::TimerStateChanged { .. }
         | Event::ModeChanged { .. } => Audience::Scope(DEVICES),
+
+        Event::DeviceCommandSent { .. } => Audience::DeviceCommand,
 
         // GET /alerts needs devices:read; what plugins report feeds it.
         Event::AlertRaised { .. }
@@ -156,6 +164,12 @@ pub fn view(claims: &Claims, audience: Audience) -> View {
         Audience::AnyScope(scopes) if scopes.iter().any(|s| claims.has_scope(s)) => View::Whole,
         Audience::PluginManifest if claims.has_scope(PLUGINS) => View::Whole,
         Audience::PluginManifest if claims.has_scope(DEVICES) => View::PluginUi,
+        Audience::DeviceCommand
+            if claims.has_scope("devices:write") || claims.has_scope("devices:command") =>
+        {
+            View::Whole
+        }
+        Audience::DeviceCommand if claims.has_scope(DEVICES) => View::CommandMasked,
         _ => View::Nothing,
     }
 }
@@ -171,6 +185,29 @@ pub fn plugin_ui_only(event: &Value) -> Value {
     });
     if let Some(ui) = event.get("ui") {
         out["ui"] = ui.clone();
+    }
+    out
+}
+
+/// A `device_command_sent` with every secret in its `command` masked: the
+/// keys config redaction masks, and any code (`code`, `user_code`).
+pub fn command_masked(event: &Value) -> Value {
+    fn mask(v: &mut Value, secret: bool) {
+        match v {
+            Value::Object(map) => {
+                for (k, v) in map.iter_mut() {
+                    let k = k.to_ascii_lowercase();
+                    mask(v, crate::handlers::is_secret_key(&k) || k.contains("code"));
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| mask(v, secret)),
+            _ if secret => *v = Value::String(crate::handlers::REDACTED_SECRET.into()),
+            _ => {}
+        }
+    }
+    let mut out = event.clone();
+    if let Some(command) = out.get_mut("command") {
+        mask(command, false);
     }
     out
 }
@@ -218,6 +255,38 @@ pub(crate) mod tests {
 
     fn now() -> chrono::DateTime<Utc> {
         Utc::now()
+    }
+
+    /// Seeing the house shows a command sent to a lock, not the code in it.
+    #[test]
+    fn a_command_is_whole_to_who_may_send_one_and_masked_to_readers() {
+        let event = Event::DeviceCommandSent {
+            timestamp: now(),
+            device_id: "lock.front".into(),
+            device_name: None,
+            command: json!({ "action": "set_code", "slot": 2, "user_code": "4321", "pin": 99 }),
+            source: "rule".into(),
+            source_id: None,
+            correlation_id: None,
+        };
+        let a = audience(&event);
+        assert_eq!(view(&key(&["devices:command"]), a), View::Whole);
+        assert_eq!(view(&user(Role::Admin), a), View::Whole);
+        assert_eq!(view(&key(&["devices:read"]), a), View::CommandMasked);
+        assert_eq!(view(&key(&["scenes:read"]), a), View::Nothing);
+
+        let shown = command_masked(&serde_json::to_value(&event).unwrap());
+        assert_eq!(shown["command"]["action"], json!("set_code"));
+        assert_eq!(shown["command"]["slot"], json!(2));
+        assert_eq!(
+            shown["command"]["user_code"],
+            json!(crate::handlers::REDACTED_SECRET)
+        );
+        assert_eq!(
+            shown["command"]["pin"],
+            json!(crate::handlers::REDACTED_SECRET)
+        );
+        assert_eq!(shown["device_id"], json!("lock.front"));
     }
 
     fn custom(event_type: &str) -> Event {

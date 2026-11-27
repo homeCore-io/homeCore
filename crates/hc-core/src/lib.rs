@@ -28,6 +28,7 @@ pub mod rule_loader;
 pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
+pub mod text;
 pub mod timer_manager;
 pub mod unit_ingest;
 pub mod vocabulary_check;

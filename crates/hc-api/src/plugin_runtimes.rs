@@ -179,7 +179,7 @@ impl BrokerLogins {
             return false;
         }
         if let Ok(Some(rt)) = self.runtimes.by_plugin_id(user) {
-            return hc_auth::api_key::verify_token(pass, &rt.key_hash);
+            return crate::plugin_runtime_handlers::verified(&rt.runtime_id, pass, &rt.key_hash);
         }
         // A device login made before a plugin took its name gives way to the plugin.
         if let Some(devices) = self
@@ -209,6 +209,16 @@ impl BrokerLogins {
             }
             None => false,
         }
+    }
+
+    /// A plugin an admin set up: listed in homecore.toml, a runtime, or given
+    /// a config file (an install, or a placement on a runtime). Unlike
+    /// [`Self::is_reserved_client_id`], a name merely shaped like a plugin's
+    /// (`plugin.anything`) is not one.
+    pub fn is_installed(&self, id: &str) -> bool {
+        self.listed.iter().any(|(l, _)| l == id)
+            || matches!(self.runtimes.by_plugin_id(id), Ok(Some(_)))
+            || self.config_for(id).is_some_and(|p| p.exists())
     }
 
     /// A client id homeCore or one of its plugins connects as.

@@ -600,8 +600,13 @@ impl Default for SchedulerSection {
     }
 }
 
+/// A field left out takes its default, as a section left out does: setting the
+/// temperature unit on a config with no `[location]` wrote one holding only
+/// `temperature_unit`, which then failed to load, and homeCore started on
+/// defaults for everything.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default)]
 pub struct LocationSection {
     pub latitude: f64,
     pub longitude: f64,

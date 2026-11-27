@@ -139,12 +139,20 @@ impl DeviceUnits {
         u
     }
 
-    /// The same, from a new schema, keeping what the siblings said.
+    /// The same, from a new schema, keeping what the siblings said about
+    /// readings the schema leaves undeclared. A reading it does declare goes
+    /// by the schema: hc-hue can report a stray `temperature_unit: "F"` before
+    /// its °C schema is stored, and keeping that hint converted every later
+    /// °C reading again until homeCore restarted.
     pub fn with_schema(&self, schema: &DeviceSchema) -> Self {
-        Self {
-            from_sibling: self.from_sibling.clone(),
-            ..Self::from_schema(Some(schema))
-        }
+        let mut u = Self::from_schema(Some(schema));
+        u.from_sibling = self
+            .from_sibling
+            .iter()
+            .filter(|(k, _)| !u.declared.contains(*k))
+            .map(|(k, s)| (k.clone(), *s))
+            .collect();
+        u
     }
 
     /// Convert what `attrs` carries to °C, in place, and say what was converted.
@@ -341,6 +349,18 @@ mod tests {
         assert!(u.normalize(&mut a).is_empty());
         assert_eq!(a["temperature"], json!(21.85));
         assert_eq!(a["temperature_unit"], json!("F"));
+    }
+
+    #[test]
+    fn a_schema_after_a_stray_sibling_still_wins() {
+        let mut u = DeviceUnits::from_schema(None);
+        u.normalize(&mut obj(
+            json!({"temperature": 70, "temperature_unit": "F"}),
+        ));
+        let mut u = u.with_schema(&schema(&[("temperature", Some("°C"))]));
+        let mut a = obj(json!({"temperature": 21.85, "temperature_unit": "F"}));
+        assert!(u.normalize(&mut a).is_empty());
+        assert_eq!(a["temperature"], json!(21.85));
     }
 
     #[test]

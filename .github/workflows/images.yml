@@ -1,0 +1,79 @@
+name: Images
+
+# Builds the images a Dockerfile change touches, without pushing them.
+#
+# Renovate bumps the base images' digests and patch tags, and merges them on
+# its own once every check on the PR is green. Before this workflow none of
+# those checks built an image: release.yml was the first to, on the next tag,
+# so a base image that broke `apk add` or the runtime's build was found at
+# release time. Now the PR that changes the recipe builds it.
+#
+# hc-core's image wraps binaries the release builds (homecore-<arch>,
+# hc-cli-<arch>); stand-ins take their place here. What a base-image change can
+# break is the base and its packages, and that is what this builds. The root
+# Dockerfile is a local convenience that ships nowhere, so it is not built.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'docker/**'
+      - '.github/workflows/images.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'docker/**'
+      - '.github/workflows/images.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: hc-core image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Stage the context as the release does
+        run: |
+          set -eu
+          ctx="$RUNNER_TEMP/core"
+          mkdir -p "$ctx"
+          cp -r docker/. "$ctx/"
+          cp config/homecore.toml.example "$ctx/config.toml.example"
+          for b in homecore hc-cli; do
+            printf '#!/bin/sh\necho stand-in\n' > "$ctx/$b-amd64"
+          done
+          echo "CTX=$ctx" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.CTX }}
+          file: ${{ env.CTX }}/Dockerfile.core
+          platforms: linux/amd64
+          push: false
+
+  runtime:
+    name: Runtime image (${{ matrix.kind }}) builds
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [python, node]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile.runtime-${{ matrix.kind }}
+          platforms: linux/amd64
+          push: false

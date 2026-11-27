@@ -4,6 +4,8 @@
 
   "enabledManagers": ["dockerfile"],
 
+  "baseBranchPatterns": ["develop"],
+
   "timezone": "America/New_York",
   "schedule": ["before 6am on monday"],
 
@@ -14,6 +16,8 @@
   "prConcurrentLimit": 6,
 
   "description": [
+    "PRs go to develop, like any other change, and reach main with the next release. Merged into main, they skipped develop and had to be merged back by hand (#49).",
+    "Automerge waits for every check on the PR, and images.yml builds each image a Dockerfile change touches, so green means the image still builds.",
     "Scope: Dockerfile base-image digests + tags only. Cargo crate updates are explicitly out of scope for the BPF-2.2 Stage 4 rollout \u2014 blast radius too big to bundle. Add `cargo` to enabledManagers in a follow-up if/when desired.",
     "Per-repo rate limits keep PR storms manageable when an upstream bumps. With 12 repos pinning the same alpine + rust digests, a single upstream rebuild produces ~15 PRs across the org."
   ],

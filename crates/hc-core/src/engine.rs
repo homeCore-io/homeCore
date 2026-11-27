@@ -324,7 +324,25 @@ impl RuleEngine {
     }
 
     /// Drive the rule engine until the bus is dropped or `shutdown` fires.
-    pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    /// Listens from the moment this is called, not from when the task first
+    /// runs: the device cache below loads before the loop starts, and the
+    /// scheduler's startup catch-up, published in the meantime, went to no
+    /// one and was lost.
+    pub fn run(
+        self,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let internal_rx = self.internal_bus.subscribe();
+        let pub_rx = self.pub_bus.subscribe();
+        self.run_listening(internal_rx, pub_rx, shutdown)
+    }
+
+    async fn run_listening(
+        self,
+        mut internal_rx: tokio::sync::broadcast::Receiver<Event>,
+        mut pub_rx: tokio::sync::broadcast::Receiver<Event>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
         // Pre-populate device cache from current state store.
         match self.state.list_devices().await {
             Ok(devices) => {
@@ -356,8 +374,6 @@ impl RuleEngine {
             Err(e) => warn!(error = %e, "Rule engine: failed to pre-populate device cache"),
         }
 
-        let mut internal_rx = self.internal_bus.subscribe();
-        let mut pub_rx = self.pub_bus.subscribe();
         let _ = self.pub_bus.publish(Event::Custom {
             timestamp: Utc::now(),
             event_type: "system_started".to_string(),
@@ -489,14 +505,10 @@ impl RuleEngine {
                     }
                 }
             }
-            self.device_cache
-                .entry(device_id.clone())
-                .and_modify(|attrs| {
-                    for (k, v) in current {
-                        attrs.insert(k.clone(), v.clone());
-                    }
-                })
-                .or_insert_with(|| current.clone());
+            // `current` is the device's whole state: an attribute it no longer
+            // reports is gone from it, so it goes from here too. Merging kept
+            // it, and conditions went on reading a value the API no longer had.
+            self.device_cache.insert(device_id.clone(), current.clone());
         }
 
         // ── 2. Snapshot rules ─────────────────────────────────────────────────
@@ -1318,11 +1330,7 @@ impl RuleEngine {
             }
 
             Condition::ScriptExpression { script } => {
-                let snippet = if script.len() > 80 {
-                    &script[..80]
-                } else {
-                    script
-                };
+                let snippet = crate::text::head(script, 80);
                 debug!(
                     rule_name = %rule.name, cond = %cond_label,
                     script = %snippet, "rule.condition: ScriptExpression — evaluating"

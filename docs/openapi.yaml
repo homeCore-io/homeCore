@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: homeCore API
-  version: "0.1.128"
+  version: "0.1.129"
   description: |
     homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -2746,7 +2746,10 @@ paths:
         record carries that slug as `room`. `room_lights_changed` says Room on
         or Room off ran: `room_id`, `room_name`, `on`, the `lights` and
         `scenes` it commanded, `snapshot_saved`, `snapshot_used`, and `source`
-        (`api` or `rule`).
+        (`api` or `rule`). `device_command_sent` carries the command whole
+        to a caller who may command devices (`devices:command` or
+        `devices:write`); to one who may only read them (`devices:read`), its
+        secrets (codes, PINs, passwords, tokens) read `__redacted__`.
 
         **Event types:** `device_state_changed`, `device_availability_changed`,
         `device_added`, `device_removed`, `device_metadata_changed`,

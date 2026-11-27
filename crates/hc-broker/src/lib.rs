@@ -159,7 +159,10 @@ impl Broker {
 
         let router = RouterConfig {
             max_connections: 1000,
-            max_outgoing_packet_count: 200,
+            // Also the most retained messages a new QoS 0 subscription is
+            // given (rumqttd drops the rest), so it is sized for a house, not
+            // a batch: core's own client subscribes at QoS 0 for this.
+            max_outgoing_packet_count: 100_000,
             max_segment_size: 104_857_600,
             max_segment_count: 10,
             ..Default::default()

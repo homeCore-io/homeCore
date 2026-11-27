@@ -64,10 +64,8 @@ pub fn generate() -> Result<NewApiKey> {
 /// Extract the lookup prefix from a bare token body (the portion *after*
 /// the `hc_sk_` prefix, as the middleware receives it).
 pub fn lookup_prefix_from_body(body: &str) -> Option<&str> {
-    if body.len() < LOOKUP_PREFIX_LEN {
-        return None;
-    }
-    Some(&body[..LOOKUP_PREFIX_LEN])
+    // `get`, not a slice: a token with a multibyte character is no token, not a panic.
+    body.get(..LOOKUP_PREFIX_LEN)
 }
 
 /// Hash a full token (`hc_sk_...`) with Argon2id using light params tuned

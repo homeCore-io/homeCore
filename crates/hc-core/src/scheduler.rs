@@ -135,11 +135,20 @@ impl Scheduler {
             self.fire_catchup().await;
         }
 
+        // The local minute the last tick looked at, and the local minute each
+        // rule's time of day last fired at. Times of day go by the wall clock,
+        // which daylight saving moves: going back, 01:30 came round twice and
+        // fired twice; going forward, 02:30 never came and never fired.
+        let mut prev_minute: Option<chrono::NaiveDateTime> = None;
+        let mut fired_at: std::collections::HashMap<Uuid, chrono::NaiveDateTime> =
+            std::collections::HashMap::new();
+
         // ── Main polling loop ───────────────────────────────────────────────
         loop {
             let now = hc_time::now_local();
             let current_time = now.time().with_second(0).unwrap_or(now.time());
             let current_day = now.weekday();
+            let this_minute = now.date_naive().and_time(current_time);
 
             debug!(current_time = %current_time, "Scheduler tick");
 
@@ -150,12 +159,19 @@ impl Scheduler {
                     if !rule.enabled {
                         continue;
                     }
+                    let time_of_day_due = fired_at.get(&rule.id) != Some(&this_minute)
+                        && rule.all_triggers().any(|trigger| match trigger {
+                            Trigger::TimeOfDay { time, days } => {
+                                let on =
+                                    |day: chrono::Weekday| days.is_empty() || days.contains(&day);
+                                (times_match(*time, current_time) && on(current_day))
+                                    || skipped_over(*time, prev_minute, this_minute)
+                                        .is_some_and(|at| on(at.weekday()))
+                            }
+                            _ => false,
+                        });
                     let fires = rule.all_triggers().any(|trigger| match trigger {
-                        Trigger::TimeOfDay { time, days } => {
-                            let time_match = times_match(*time, current_time);
-                            let day_match = days.is_empty() || days.contains(&current_day);
-                            time_match && day_match
-                        }
+                        Trigger::TimeOfDay { .. } => time_of_day_due,
                         Trigger::SunEvent {
                             event,
                             offset_minutes,
@@ -195,6 +211,9 @@ impl Scheduler {
                     });
 
                     if fires {
+                        if time_of_day_due {
+                            fired_at.insert(rule.id, this_minute);
+                        }
                         if rule
                             .all_triggers()
                             .any(|t| matches!(t, Trigger::Periodic { .. }))
@@ -278,6 +297,8 @@ impl Scheduler {
                     }
                 }
             } // read lock released here
+
+            prev_minute = Some(this_minute);
 
             // Sleep until the start of the next minute, waking early on shutdown.
             let secs_until_next_minute = 60 - now.second() as u64;
@@ -486,6 +507,26 @@ fn cron_fired_in_window(
 /// Using `==` after `with_second(0)` would fail because `hc_time::now_local().time()` carries
 /// non-zero nanoseconds that `with_second` preserves, while `solar_event_time` and
 /// TOML-parsed times use `from_hms_opt` which produces zero nanoseconds.
+/// When the wall clock jumped past `time` between the last tick and this one
+/// (daylight saving going forward, or a tick that came late), the moment it
+/// skipped. A jump of more than two hours is a machine that was asleep, not a
+/// clock change, and catch-up at startup is the place for that.
+fn skipped_over(
+    time: NaiveTime,
+    prev: Option<chrono::NaiveDateTime>,
+    now: chrono::NaiveDateTime,
+) -> Option<chrono::NaiveDateTime> {
+    let prev = prev?;
+    let gap = now - prev;
+    if gap <= chrono::Duration::minutes(1) || gap > chrono::Duration::hours(2) {
+        return None;
+    }
+    [prev.date(), now.date()]
+        .into_iter()
+        .map(|d| d.and_time(time.with_second(0).unwrap_or(time)))
+        .find(|at| *at > prev && *at < now)
+}
+
 fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
     trigger_time.hour() == current_time.hour() && trigger_time.minute() == current_time.minute()
 }
@@ -495,6 +536,20 @@ fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
 /// Public to `crate` so `ModeManager` can reuse the calculation.
 ///
 /// Returns `None` if the event doesn't occur on this day (polar regions).
+/// The configured zone's offset from UTC on `date`, in minutes, taken at
+/// local noon. Today's offset was used for every date, so a sun time worked
+/// out for a day across a DST change (ModeManager looks ahead) was an hour
+/// out.
+fn utc_offset_on(tz: chrono_tz::Tz, date: chrono::NaiveDate) -> f64 {
+    use chrono::TimeZone;
+    let noon = date.and_hms_opt(12, 0, 0).unwrap_or_default();
+    tz.from_local_datetime(&noon)
+        .earliest()
+        .map(|t| t.offset().fix().local_minus_utc())
+        .unwrap_or(0) as f64
+        / 60.0
+}
+
 pub(crate) fn solar_event_time(
     lat: f64,
     lon: f64,
@@ -517,8 +572,7 @@ pub(crate) fn solar_event_time(
         SunEventType::SolarNoon => {
             // Solar noon is just 12:00 adjusted for longitude (UTC result).
             let noon_min = 720.0 - 4.0 * lon - equation_of_time(day_of_year);
-            let utc_offset_min =
-                hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
+            let utc_offset_min = utc_offset_on(hc_time::configured_tz(), date);
             let total_min = (noon_min + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
             let h = (total_min / 60.0).floor() as u32;
             let m = (total_min % 60.0).abs() as u32;
@@ -552,7 +606,7 @@ pub(crate) fn solar_event_time(
 
     // event_minutes is UTC; convert to local wall-clock time so it can be
     // compared directly against hc_time::now_local().time() in the scheduler.
-    let utc_offset_min = hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
+    let utc_offset_min = utc_offset_on(hc_time::configured_tz(), date);
     let total_minutes = (event_minutes + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
     let h = (total_minutes / 60.0) as u32;
     let m = (total_minutes % 60.0) as u32;
@@ -578,6 +632,41 @@ fn equation_of_time(day_of_year: f64) -> f64 {
 
 #[cfg(test)]
 mod cron_tests {
+    use chrono::NaiveDate;
+
+    fn wall(h: u32, m: u32) -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2027, 3, 14)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
+    }
+
+    /// A sun time for another date uses that date's offset, not today's.
+    #[test]
+    fn the_offset_is_the_one_on_the_date() {
+        let ny = chrono_tz::America::New_York;
+        let jan = NaiveDate::from_ymd_opt(2027, 1, 15).unwrap();
+        let jul = NaiveDate::from_ymd_opt(2027, 7, 15).unwrap();
+        assert_eq!(super::utc_offset_on(ny, jan), -300.0);
+        assert_eq!(super::utc_offset_on(ny, jul), -240.0);
+    }
+
+    /// Clocks going forward: 01:59 then 03:00, so 02:30 is never a tick.
+    #[test]
+    fn a_time_the_clock_jumped_over_is_found() {
+        let t = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
+        assert_eq!(
+            skipped_over(t, Some(wall(1, 59)), wall(3, 0)),
+            Some(wall(2, 30))
+        );
+        // An ordinary minute skips nothing, and the minute itself is the
+        // tick's own to match.
+        assert_eq!(skipped_over(t, Some(wall(2, 29)), wall(2, 30)), None);
+        // Hours asleep are for startup catch-up, not this.
+        assert_eq!(skipped_over(t, Some(wall(0, 0)), wall(5, 0)), None);
+        assert_eq!(skipped_over(t, None, wall(3, 0)), None);
+    }
+
     use super::*;
     use chrono::TimeZone;
 

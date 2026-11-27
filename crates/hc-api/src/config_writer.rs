@@ -14,7 +14,21 @@ use anyhow::{anyhow, Context, Result};
 /// entry is found, or the write fails. The matching entry's other
 /// fields and surrounding TOML structure (other entries, comments,
 /// section ordering) are left untouched.
+/// Held from reading homecore.toml to writing it back. Each edit (a save in
+/// Configuration, the temperature unit, a plugin turned on or off, the broker
+/// opened) read the file, changed it and wrote it whole, so two at once kept
+/// only the last one's change.
+///
+/// A std guard, not tokio's: it can't be held across an `.await` in a
+/// handler, which is the point, since nothing between the read and the write
+/// should wait on anything.
+pub fn core_config_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn persist_plugin_enabled(config_path: &Path, plugin_id: &str, enabled: bool) -> Result<()> {
+    let _edit = core_config_lock();
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("read {}", config_path.display()))?;
 
@@ -75,6 +89,20 @@ pub fn persist_plugin_enabled(config_path: &Path, plugin_id: &str, enabled: bool
 ///
 /// Returns the new TOML string ready to write atomically.
 pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<String> {
+    patch_sections(current, patch, true)
+}
+
+/// The same for a plugin's config, except that a section the file already
+/// had stays when a patch empties it. homeCore's own sections all default
+/// when absent; a plugin's may not (a section struct with no `#[serde(default)]`
+/// parses from a bare header and fails without one), and comments above a
+/// removed header went with it. A section the patch only made to hold a
+/// `null` is still left out.
+pub fn apply_plugin_patch(current: &str, patch: &serde_json::Value) -> Result<String> {
+    patch_sections(current, patch, false)
+}
+
+fn patch_sections(current: &str, patch: &serde_json::Value, drop_emptied: bool) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = current
         .parse()
         .with_context(|| "parse current homecore.toml")?;
@@ -88,6 +116,7 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
             anyhow!("patch[{section_path:?}] must be an object of field=value pairs")
         })?;
 
+        let existed = section_exists(&doc, section_path);
         // Walk the dotted section path (e.g. "auth.admin_uds") to
         // get a mutable Table handle.
         let table = walk_to_table_mut(&mut doc, section_path)?;
@@ -111,7 +140,7 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
         // its latitude and longitude, so clearing `temperature_unit` from a
         // file with no `[location]` used to leave one that stopped the next
         // start.
-        if table.is_empty() {
+        if table.is_empty() && (drop_emptied || !existed) {
             remove_section(&mut doc, section_path);
         }
     }
@@ -254,6 +283,17 @@ fn same_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
 /// mutable handle to the table at the leaf. Creates intermediate
 /// tables if missing.
 /// Take the table at `section_path` out of its parent, if it is there.
+fn section_exists(doc: &toml_edit::DocumentMut, section_path: &str) -> bool {
+    let mut current: &toml_edit::Item = doc.as_item();
+    for seg in section_path.split('.') {
+        match current.get(seg) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+    current.is_table_like()
+}
+
 fn remove_section(doc: &mut toml_edit::DocumentMut, section_path: &str) {
     let (parent, leaf) = match section_path.rsplit_once('.') {
         Some((p, l)) => (Some(p), l),
@@ -405,6 +445,18 @@ mod tests {
         let v: toml::Value = toml::from_str(&after).unwrap();
         assert_eq!(v["location"]["latitude"].as_float(), Some(38.9));
         assert!(v["location"].get("temperature_unit").is_none());
+    }
+
+    #[test]
+    fn a_plugin_section_a_patch_empties_stays() {
+        let before = "# the bridge\n[bridge]\ntoken = \"x\"\n";
+        let patch = serde_json::json!({ "bridge": { "token": null } });
+        let after = super::apply_plugin_patch(before, &patch).unwrap();
+        assert!(after.contains("# the bridge\n[bridge]"), "{after}");
+        // One the patch would only have made is still not written.
+        let patch = serde_json::json!({ "other": { "x": null } });
+        let after = super::apply_plugin_patch(before, &patch).unwrap();
+        assert!(!after.contains("[other]"), "{after}");
     }
 
     #[test]
