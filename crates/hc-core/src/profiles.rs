@@ -32,6 +32,16 @@ use tracing::{info, warn};
 const HEARD_CAP: usize = 300;
 /// How much of an unmatched topic's last message is kept, in characters.
 const HEARD_PAYLOAD_CHARS: usize = 300;
+/// The largest last message kept whole, to take in later.
+const HEARD_RAW_MAX: usize = 16 * 1024;
+
+fn kept(payload: &[u8]) -> Vec<u8> {
+    if payload.len() <= HEARD_RAW_MAX {
+        payload.to_vec()
+    } else {
+        Vec::new()
+    }
+}
 
 /// A profile file in the profiles folder.
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +78,10 @@ pub struct HeardTopic {
     pub last_payload: String,
     /// A shipped profile, not turned on, that would take it in.
     pub looks_like: Option<String>,
+    /// Its last message whole, to take in when a profile that matches it is
+    /// turned on. Empty when it was too big to keep.
+    #[serde(skip)]
+    pub raw: Vec<u8>,
 }
 
 /// One change to a device's entry in a profile's `[ecosystem.devices]`.
@@ -326,6 +340,7 @@ impl ProfileSet {
             h.count += 1;
             h.last_at = now;
             h.last_payload = text;
+            h.raw = kept(payload);
             return;
         }
         if heard.len() >= HEARD_CAP {
@@ -346,6 +361,7 @@ impl ProfileSet {
                 last_at: now,
                 last_payload: text,
                 looks_like: None,
+                raw: kept(payload),
             },
         );
     }
@@ -384,6 +400,28 @@ impl ProfileSet {
         }
         out.sort_by(|a, b| b.count.cmp(&a.count).then(a.topic.cmp(&b.topic)));
         out
+    }
+
+    /// The unmatched topics `router` now takes in, with their last message,
+    /// taken out of the list: a profile just turned on or saved, given what the
+    /// broker already carried, so its devices appear without waiting for each
+    /// to report again.
+    pub fn take_heard_matching(&self, router: &EcosystemRouter) -> Vec<(String, Vec<u8>)> {
+        let mut heard = self.heard.lock().unwrap();
+        let matching: Vec<String> = heard
+            .values()
+            .filter(|h| !h.raw.is_empty())
+            .filter(|h| matches!(router.route_inbound(&h.topic, &h.raw), Ok(Some(_))))
+            .map(|h| h.topic.clone())
+            .collect();
+        let mut out: Vec<(String, Vec<u8>, DateTime<Utc>)> = matching
+            .into_iter()
+            .filter_map(|t| heard.remove(&t))
+            .map(|h| (h.topic, h.raw, h.last_at))
+            .collect();
+        // Oldest first, so a device's latest message is the one that stays.
+        out.sort_by_key(|x| x.2);
+        out.into_iter().map(|(t, p, _)| (t, p)).collect()
     }
 
     // ── Suggestions ─────────────────────────────────────────────────────────
@@ -820,7 +858,7 @@ pub enum TryResult {
 fn check_file_name(file: &str) -> Result<()> {
     let ok = file.ends_with(".toml")
         && file.len() > 5
-        && file != "device-types.toml"
+        && !hc_topic_map::loader::NOT_PROFILES.contains(&file)
         && !file.starts_with('.')
         && file
             .chars()
@@ -1020,6 +1058,8 @@ attribute = "on"
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("plugs.toml"), PLUG).unwrap();
         std::fs::write(dir.path().join("broken.toml"), "[ecosystem]\nname = \n").unwrap();
+        // The device logins live here too, and aren't a profile.
+        std::fs::write(dir.path().join("logins.toml"), "[[login]]\n").unwrap();
         let set = ProfileSet::load(dir.path());
         (dir, set)
     }
@@ -1186,6 +1226,7 @@ attribute = "on"
         assert!(err.to_string().contains("plugs.toml"), "{err}");
         assert!(set.save("../escape.toml", PLUG).is_err());
         assert!(set.save("device-types.toml", PLUG).is_err());
+        assert!(set.save("logins.toml", PLUG).is_err());
 
         let mine = PLUG
             .replace("\"plugs\"", "\"sockets\"")

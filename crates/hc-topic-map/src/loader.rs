@@ -8,6 +8,10 @@ use crate::profile::{EcosystemProfile, ProfileFile};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+/// Files in the profiles folder that aren't profiles: the device type catalog,
+/// and the logins devices use to reach the broker.
+pub const NOT_PROFILES: &[&str] = &["device-types.toml", "logins.toml"];
+
 /// Load a single profile from a TOML string (used in tests and for inline profiles).
 pub fn load_profile_str(src: &str) -> Result<EcosystemProfile> {
     let file: ProfileFile = toml::from_str(src).context("Failed to parse ecosystem profile")?;
@@ -41,8 +45,8 @@ pub fn load_profiles_from_dir(dir: &str) -> Result<Vec<EcosystemProfile>> {
 
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // device-types.toml is loaded separately.
-        if filename == "device-types.toml" {
+        // The catalog and the device logins live here too; they aren't profiles.
+        if NOT_PROFILES.contains(&filename) {
             continue;
         }
 
@@ -120,7 +124,11 @@ pub fn read_profiles_from_dir(dir: &str) -> Result<Vec<ProfileRead>> {
     let mut paths: Vec<_> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
-        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("device-types.toml"))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !NOT_PROFILES.contains(&n))
+        })
         .collect();
     paths.sort();
     Ok(paths

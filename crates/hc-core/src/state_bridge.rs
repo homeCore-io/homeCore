@@ -835,6 +835,18 @@ impl StateBridge {
         let Some(router) = self.router() else {
             return;
         };
+        // What the broker already carried for a profile just turned on or
+        // saved: taken in now, not on each device's next report.
+        let replay = self
+            .profiles
+            .as_ref()
+            .map(|p| p.take_heard_matching(&router))
+            .unwrap_or_default();
+        for (topic, payload) in replay {
+            if let Err(e) = Box::pin(self.handle_mqtt(&topic, &payload)).await {
+                warn!(topic, error = %e, "Could not take in an earlier message");
+            }
+        }
         for (_, device_id, described) in router.configured_devices() {
             match self.store.get_device(&device_id).await {
                 Ok(Some(_)) => {
@@ -2137,6 +2149,46 @@ mod profile_device_tests {
             .await
             .unwrap();
         assert!(store.get_device("tasmota_kitchen").await.unwrap().is_none());
+    }
+
+    /// Turning an ecosystem on takes in what the broker already carried for
+    /// it: its devices appear at once, not on each one's next report.
+    #[tokio::test]
+    async fn turning_an_ecosystem_on_takes_in_what_was_already_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = crate::profiles::ProfileSet::load(dir.path());
+        let db = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &db.path().join("s.redb").to_string_lossy(),
+            &db.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let bridge = StateBridge::new(EventBus::new(64), EventBus::new(64), store.clone())
+            .with_profiles(Arc::clone(&set));
+
+        bridge
+            .handle_mqtt("shellies/shelly1-98CDAC/relay/0", b"on")
+            .await
+            .unwrap();
+        assert!(store
+            .get_device("shelly_shelly1-98CDAC_relay0")
+            .await
+            .unwrap()
+            .is_none());
+
+        set.turn_on("shelly-gen1.toml").unwrap();
+        bridge.profiles_changed().await;
+        let relay = store
+            .get_device("shelly_shelly1-98CDAC_relay0")
+            .await
+            .unwrap()
+            .expect("taken in from what was heard");
+        assert_eq!(relay.device_type.as_deref(), Some("switch"));
+        assert_eq!(relay.attributes["on"], serde_json::json!(true));
+        assert!(set
+            .heard_since(Utc::now() - chrono::Duration::minutes(5))
+            .is_empty());
     }
 
     /// Saying what a device is from the app applies at once, to a device that
