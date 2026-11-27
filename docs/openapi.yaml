@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: homeCore API
-  version: "0.1.127"
+  version: "0.1.128"
   description: |
     homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -5048,7 +5048,8 @@ paths:
         and how many have no type; the shipped profiles that are off; whether
         the device type catalog is there; and the topics on the broker in the
         last hour that no profile took in, each with the shipped profile that
-        would. Admin only.
+        would; and `warnings` (0.1.128), what is wrong with the profiles as a
+        whole, such as two of them claiming the same topic. Admin only.
       tags: [mqtt]
       security:
         - bearerAuth: []

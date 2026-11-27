@@ -36,3 +36,12 @@ fn every_type_an_example_profile_names_is_in_the_catalog() {
     }
     assert!(named > 0, "the examples name some types");
 }
+
+/// The shipped profiles, all on, claim no topic twice.
+#[test]
+fn the_examples_claim_no_topic_twice() {
+    let dir = "../../config/profiles/examples";
+    let profiles = hc_topic_map::loader::load_profiles_from_dir(dir).unwrap();
+    let router = hc_topic_map::EcosystemRouter::new(profiles, None).unwrap();
+    assert_eq!(router.claimed_twice(), Vec::<String>::new());
+}

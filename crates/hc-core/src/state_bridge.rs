@@ -209,6 +209,9 @@ impl StateBridge {
                     Ok(Some(results)) => {
                         for result in results {
                             debug!(from = topic, to = %result.target_topic, "Relaying cmd to native topic");
+                            if let Some(p) = &self.profiles {
+                                p.relayed(&result.target_topic);
+                            }
                             if let Some(ph) = &self.publish {
                                 if let Err(e) =
                                     ph.publish(&result.target_topic, result.payload).await
@@ -252,13 +255,13 @@ impl StateBridge {
                 }
                 Ok(Some(InboundResult::Availability {
                     profile,
-                    device_id,
                     available,
+                    covers,
+                    ..
                 })) => {
-                    if let Some(p) = &self.profiles {
-                        p.came_through(&device_id, &profile);
-                    }
-                    return self.handle_availability(&device_id, available).await;
+                    return self
+                        .handle_profile_availability(&profile, &covers, available)
+                        .await;
                 }
                 Ok(None) => {
                     debug!(
@@ -818,6 +821,11 @@ impl StateBridge {
             .unwrap_or_default();
         for device_id in cleared {
             if let Ok(Some(mut d)) = self.store.get_device(&device_id).await {
+                // A plugin's device is the plugin's to describe, whatever a
+                // profile once said of an id it doesn't own.
+                if owned_by_plugin(&d) {
+                    continue;
+                }
                 if d.device_type.take().is_some() {
                     if let Err(e) = self.store.upsert_device(&d).await {
                         warn!(device_id, error = %e, "Could not take a device's type off");
@@ -830,6 +838,19 @@ impl StateBridge {
                         "Device type taken off; its profile no longer names one"
                     );
                 }
+            }
+        }
+        // An ecosystem turned off or deleted: its devices stay, and stop
+        // being updated, so they are not shown as online. A command to one
+        // goes nowhere now.
+        let gone = self
+            .profiles
+            .as_ref()
+            .map(|p| p.take_devices_of_gone_profiles())
+            .unwrap_or_default();
+        for device_id in gone {
+            if let Err(e) = self.handle_availability(&device_id, false).await {
+                warn!(device_id, error = %e, "Could not mark a device offline");
             }
         }
         let Some(router) = self.router() else {
@@ -849,6 +870,7 @@ impl StateBridge {
         }
         for (_, device_id, described) in router.configured_devices() {
             match self.store.get_device(&device_id).await {
+                Ok(Some(d)) if owned_by_plugin(&d) => {}
                 Ok(Some(_)) => {
                     if let Err(e) = self.describe_profile_device(&device_id, &described).await {
                         warn!(device_id, error = %e, "Could not register a profile device");
@@ -1195,6 +1217,39 @@ impl StateBridge {
         Ok(())
     }
 
+    /// An ecosystem's online/offline topic, for every device it speaks for
+    /// that homeCore has: a Shelly's `online` is for its relays and sensors,
+    /// whose ids are not the Shelly's own. It makes no device: one that
+    /// hasn't reported yet arrives with its first reading, and an id no state
+    /// topic makes would be a device with nothing in it.
+    async fn handle_profile_availability(
+        &self,
+        profile: &Arc<str>,
+        covers: &[String],
+        available: bool,
+    ) -> Result<()> {
+        let ids: Vec<String> = self
+            .store
+            .list_devices()
+            .await?
+            .into_iter()
+            .filter(|d| !owned_by_plugin(d))
+            .map(|d| d.device_id)
+            .filter(|id| {
+                covers
+                    .iter()
+                    .any(|c| hc_topic_map::pattern::id_matches(c, id))
+            })
+            .collect();
+        for id in ids {
+            if let Some(p) = &self.profiles {
+                p.came_through(&id, profile);
+            }
+            self.handle_availability(&id, available).await?;
+        }
+        Ok(())
+    }
+
     async fn handle_availability(&self, device_id: &str, available: bool) -> Result<()> {
         let mut device = match self.store.get_device(device_id).await? {
             Some(d) => d,
@@ -1278,6 +1333,14 @@ impl StateBridge {
 
         DeviceChange::unknown()
     }
+}
+
+/// A device a plugin (or core itself) owns, not one an ecosystem profile made:
+/// a profile's device is filed under the start of its id ([`profile_plugin_id`]).
+fn owned_by_plugin(d: &DeviceState) -> bool {
+    d.plugin_id.starts_with("plugin.")
+        || d.plugin_id.starts_with("core.")
+        || d.plugin_id != profile_plugin_id(&d.device_id)
 }
 
 /// The plugin a device with no plugin of its own (one a profile maps, or
@@ -2018,6 +2081,62 @@ mod alert_tests {
 mod profile_device_tests {
     use super::*;
     use hc_types::device::DeviceState;
+
+    const SHELLY_PROFILE: &str = r#"
+        [ecosystem]
+        name   = "shelly"
+        prefix = "shelly_"
+
+        [[ecosystem.state_topics]]
+        pattern   = "shellies/{device}/relay/{relay}"
+        device_id = "shelly_{device}_relay{relay}"
+        attribute = "on"
+        coerce    = { on = "onoff_to_bool" }
+
+        [[ecosystem.availability_topics]]
+        pattern = "shellies/{device}/online"
+        payload = "raw_bool"
+    "#;
+
+    /// A Shelly's `online` is for its relays, whose ids are not the Shelly's
+    /// own: it used to go to `shelly_sh1`, a device made of nothing, and the
+    /// relays never went offline.
+    #[tokio::test]
+    async fn an_ecosystems_online_topic_is_for_the_devices_it_speaks_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let profile = hc_topic_map::loader::load_profile_str(SHELLY_PROFILE).unwrap();
+        let router = EcosystemRouter::new(vec![profile], None).unwrap();
+        let bridge = StateBridge::new(EventBus::new(64), EventBus::new(64), store.clone())
+            .with_router(Arc::new(router));
+
+        for (topic, payload) in [
+            ("shellies/sh1/relay/0", "on"),
+            ("shellies/sh1/relay/1", "off"),
+            ("shellies/sh1_2/relay/0", "on"),
+        ] {
+            bridge.handle_mqtt(topic, payload.as_bytes()).await.unwrap();
+        }
+        bridge
+            .handle_mqtt("shellies/sh1/online", b"false")
+            .await
+            .unwrap();
+
+        for (id, up) in [
+            ("shelly_sh1_relay0", false),
+            ("shelly_sh1_relay1", false),
+            ("shelly_sh1_2_relay0", true),
+        ] {
+            let d = store.get_device(id).await.unwrap().unwrap();
+            assert_eq!(d.available, up, "{id}");
+        }
+        assert!(store.get_device("shelly_sh1").await.unwrap().is_none());
+    }
 
     const PLUG_PROFILE: &str = r#"
         [ecosystem]

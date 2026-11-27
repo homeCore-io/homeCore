@@ -32,6 +32,9 @@ use tracing::{info, warn};
 const HEARD_CAP: usize = 300;
 /// How much of an unmatched topic's last message is kept, in characters.
 const HEARD_PAYLOAD_CHARS: usize = 300;
+/// How recent a message heard before its ecosystem was on must be to be
+/// taken in when it is turned on.
+const REPLAY_WITHIN_SECS: i64 = 15 * 60;
 /// The largest last message kept whole, to take in later.
 const HEARD_RAW_MAX: usize = 16 * 1024;
 
@@ -88,6 +91,17 @@ pub struct HeardTopic {
     pub raw: Vec<u8>,
 }
 
+impl HeardTopic {
+    /// Its last message: whole when it was kept, else the start of it.
+    pub fn message(&self) -> &[u8] {
+        if self.raw.is_empty() {
+            self.last_payload.as_bytes()
+        } else {
+            &self.raw
+        }
+    }
+}
+
 /// One change to a device's entry in a profile's `[ecosystem.devices]`.
 /// Both `None` removes the entry.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -124,6 +138,13 @@ pub struct ProfileSet {
     changes: watch::Sender<u64>,
     /// The last reload the state bridge has applied.
     applied: watch::Sender<u64>,
+    /// Held while the folder changes and is read again, so two changes from
+    /// the app (two quick device changes, a save while turning on) neither
+    /// lose one another's edit nor swap in a reload older than the folder.
+    writing: Mutex<()>,
+    /// Topics homeCore itself published a command to: heard back from the
+    /// broker, they are not a device it is missing.
+    relayed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProfileSet {
@@ -161,6 +182,8 @@ impl ProfileSet {
             cleared: Mutex::new(Vec::new()),
             changes: watch::channel(0).0,
             applied: watch::channel(0).0,
+            writing: Mutex::new(()),
+            relayed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -212,6 +235,12 @@ impl ProfileSet {
     /// Read the folder again and swap in what it now says. A file that
     /// doesn't parse is left out (and reported); the rest still load.
     pub fn reload(&self) {
+        let _w = self.writing.lock().unwrap();
+        self.reload_held();
+    }
+
+    /// [`Self::reload`], for one already holding `writing`.
+    fn reload_held(&self) {
         let Some(dir) = self.dir.as_deref() else {
             return;
         };
@@ -297,6 +326,9 @@ impl ProfileSet {
             catalog = loaded.catalog.is_some(),
             "Ecosystem profiles loaded"
         );
+        if let (Some(new), Some(old)) = (&loaded.router, &self.snapshot().router) {
+            new.learn_from(old);
+        }
         *self.loaded.write().unwrap() = Arc::new(loaded);
         self.changes.send_modify(|n| *n += 1);
     }
@@ -316,15 +348,43 @@ impl ProfileSet {
         }
     }
 
+    /// The devices that came through a profile no longer loaded (turned off,
+    /// deleted, renamed), forgotten as having come through it.
+    pub fn take_devices_of_gone_profiles(&self) -> Vec<String> {
+        let names: Vec<String> = self.files().into_iter().filter_map(|f| f.name).collect();
+        let mut map = self.came_through.lock().unwrap();
+        let gone: Vec<String> = map
+            .iter()
+            .filter(|(_, p)| !names.iter().any(|n| n.as_str() == &***p))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &gone {
+            map.remove(id);
+        }
+        gone
+    }
+
     /// The profile a device came through this session, if it has reported.
     pub fn profile_of(&self, device_id: &str) -> Option<Arc<str>> {
         self.came_through.lock().unwrap().get(device_id).cloned()
+    }
+
+    /// Note a topic homeCore relayed a command to.
+    pub fn relayed(&self, topic: &str) {
+        let mut set = self.relayed.lock().unwrap();
+        if set.len() >= HEARD_CAP && !set.contains(topic) {
+            set.clear();
+        }
+        set.insert(topic.to_string());
     }
 
     /// Note a topic no profile took in. homeCore's own topics, and the
     /// broker's, are not someone's devices and aren't kept.
     pub fn heard_unmatched(&self, topic: &str, payload: &[u8]) {
         if topic.starts_with("homecore/") || topic.starts_with('$') {
+            return;
+        }
+        if self.relayed.lock().unwrap().contains(topic) {
             return;
         }
         // A topic under an ecosystem that is on (Zigbee2MQTT's own `bridge/`
@@ -387,7 +447,7 @@ impl ProfileSet {
             .collect();
         for h in &mut out {
             h.looks_like = loaded.candidates.as_ref().and_then(|c| {
-                match c.route_inbound(&h.topic, h.last_payload.as_bytes()) {
+                match c.route_inbound(&h.topic, h.message()) {
                     Ok(Some(InboundResult::State { profile, .. }))
                     | Ok(Some(InboundResult::Availability { profile, .. })) => {
                         Some(profile.to_string())
@@ -398,12 +458,7 @@ impl ProfileSet {
         }
         // A topic a loaded profile now takes in isn't unmatched any more.
         if let Some(router) = &loaded.router {
-            out.retain(|h| {
-                !matches!(
-                    router.route_inbound(&h.topic, h.last_payload.as_bytes()),
-                    Ok(Some(_))
-                )
-            });
+            out.retain(|h| !matches!(router.route_inbound(&h.topic, h.message()), Ok(Some(_))));
         }
         out.sort_by(|a, b| b.count.cmp(&a.count).then(a.topic.cmp(&b.topic)));
         out
@@ -413,11 +468,16 @@ impl ProfileSet {
     /// taken out of the list: a profile just turned on or saved, given what the
     /// broker already carried, so its devices appear without waiting for each
     /// to report again.
+    ///
+    /// Only what was heard lately: an older message (motion an hour ago) taken
+    /// in now would be news it isn't, and set off rules. A device that
+    /// reported before that shows on its next report.
     pub fn take_heard_matching(&self, router: &EcosystemRouter) -> Vec<(String, Vec<u8>)> {
+        let since = Utc::now() - chrono::Duration::seconds(REPLAY_WITHIN_SECS);
         let mut heard = self.heard.lock().unwrap();
         let matching: Vec<String> = heard
             .values()
-            .filter(|h| !h.raw.is_empty())
+            .filter(|h| !h.raw.is_empty() && h.last_at >= since)
             .filter(|h| matches!(router.route_inbound(&h.topic, &h.raw), Ok(Some(_))))
             .map(|h| h.topic.clone())
             .collect();
@@ -513,6 +573,7 @@ impl ProfileSet {
     /// catalog); one that isn't changes nothing.
     pub fn set_devices(&self, profile: &str, changes: &[DeviceEntryChange]) -> Result<()> {
         let dir = self.require_dir()?;
+        let _w = self.writing.lock().unwrap();
         let file = self
             .file_of(profile)
             .ok_or_else(|| anyhow!("no profile named {profile}"))?;
@@ -534,14 +595,9 @@ impl ProfileSet {
         let next = with_device_entries(&text, changes)?;
         load_profile_str(&next).context("the change would make the profile not load")?;
         write_atomic(&path, next.as_bytes()).with_context(|| format!("writing {file}"))?;
-        self.cleared.lock().unwrap().extend(
-            changes
-                .iter()
-                .filter(|c| c.device_type.as_deref().is_none_or(|t| t.trim().is_empty()))
-                .map(|c| c.device_id.clone()),
-        );
+        self.clear_types_gone(&text, &next);
         info!(profile, file = %file, changes = changes.len(), "Profile devices changed");
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -573,6 +629,16 @@ impl ProfileSet {
         let _ = tokio::time::timeout(timeout, rx.wait_for(|n| *n >= generation)).await;
     }
 
+    /// Note the devices `before` gave a type and `after` doesn't, for the
+    /// bridge to take the type off: by the app, or by editing the text.
+    fn clear_types_gone(&self, before: &str, after: &str) {
+        let now: Vec<String> = typed_devices(after);
+        let gone = typed_devices(before)
+            .into_iter()
+            .filter(|id| !now.contains(id));
+        self.cleared.lock().unwrap().extend(gone);
+    }
+
     /// The devices whose type was taken out of a profile since last asked.
     pub fn take_cleared(&self) -> Vec<String> {
         std::mem::take(&mut *self.cleared.lock().unwrap())
@@ -582,6 +648,7 @@ impl ProfileSet {
     /// none, and apply it.
     pub fn install_catalog(&self) -> Result<bool> {
         let dir = self.require_dir()?;
+        let _w = self.writing.lock().unwrap();
         std::fs::create_dir_all(dir)?;
         let path = dir.join("device-types.toml");
         if path.exists() {
@@ -589,7 +656,7 @@ impl ProfileSet {
         }
         write_atomic(&path, shipped::DEVICE_TYPES.as_bytes())?;
         info!(path = %path.display(), "Device type catalog added");
-        self.reload();
+        self.reload_held();
         Ok(true)
     }
 
@@ -609,6 +676,8 @@ impl ProfileSet {
                 let name = e.file_name().to_string_lossy().into_owned();
                 let file = name.strip_suffix(".off")?.to_string();
                 file.ends_with(".toml").then_some(())?;
+                // A catalog turned off by hand is not a profile to turn on.
+                (!hc_topic_map::loader::NOT_PROFILES.contains(&file.as_str())).then_some(())?;
                 let text = std::fs::read_to_string(e.path()).ok()?;
                 let profile = load_profile_str(&text).ok();
                 Some(OffProfile {
@@ -638,17 +707,28 @@ impl ProfileSet {
     /// What turning `file` on would take in from what the broker carries now:
     /// each device it would make, with the type the profile gives it.
     pub fn preview(&self, file: &str) -> Result<Vec<PreviewDevice>> {
+        check_file_name(file)?;
         let text = self
             .off_text(file)
             .ok_or_else(|| anyhow!("no profile {file} to turn on"))?;
         let profile = load_profile_str(&text)?;
         let router = EcosystemRouter::with_scripts(vec![profile], &[]);
-        let heard: Vec<HeardTopic> = self.heard.lock().unwrap().values().cloned().collect();
+        // What turning it on would take in: what was heard lately, as
+        // [`Self::take_heard_matching`] takes it.
+        let since = Utc::now() - chrono::Duration::seconds(REPLAY_WITHIN_SECS);
+        let heard: Vec<HeardTopic> = self
+            .heard
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|h| h.last_at >= since)
+            .cloned()
+            .collect();
         let mut out: Vec<PreviewDevice> = Vec::new();
         for h in heard {
             if let Ok(Some(InboundResult::State {
                 device_id, device, ..
-            })) = router.route_inbound(&h.topic, h.last_payload.as_bytes())
+            })) = router.route_inbound(&h.topic, h.message())
             {
                 let device_type = device.as_ref().and_then(|d| d.device_type.clone());
                 let name = device.and_then(|d| d.name);
@@ -675,6 +755,7 @@ impl ProfileSet {
     pub fn turn_on(&self, file: &str) -> Result<()> {
         let dir = self.require_dir()?;
         check_file_name(file)?;
+        let _w = self.writing.lock().unwrap();
         std::fs::create_dir_all(dir)?;
         let path = dir.join(file);
         if path.exists() {
@@ -682,6 +763,14 @@ impl ProfileSet {
         }
         let off = dir.join(format!("{file}.off"));
         if off.exists() {
+            // Two profiles of one name would leave which one a device change
+            // goes to up to the order of the folder.
+            let text = std::fs::read_to_string(&off)?;
+            if let Some(name) = load_profile_str(&text).ok().map(|p| p.name) {
+                if let Some(other) = self.file_of(&name) {
+                    bail!("{other} is already on with the name {name}; turn it off first");
+                }
+            }
             std::fs::rename(&off, &path)?;
         } else {
             let src = shipped::PROFILES
@@ -706,7 +795,7 @@ impl ProfileSet {
             write_atomic(&catalog, shipped::DEVICE_TYPES.as_bytes())?;
         }
         info!(file, "Ecosystem profile turned on");
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -715,13 +804,14 @@ impl ProfileSet {
     pub fn turn_off(&self, file: &str) -> Result<()> {
         let dir = self.require_dir()?;
         check_file_name(file)?;
+        let _w = self.writing.lock().unwrap();
         let path = dir.join(file);
         if !path.exists() {
             bail!("{file} isn't on");
         }
         std::fs::rename(&path, dir.join(format!("{file}.off")))?;
         info!(file, "Ecosystem profile turned off");
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -744,6 +834,7 @@ impl ProfileSet {
     pub fn save(&self, file: &str, text: &str) -> Result<()> {
         let dir = self.require_dir()?;
         check_file_name(file)?;
+        let _w = self.writing.lock().unwrap();
         let profile = load_profile_str(text).map_err(|e| anyhow!("{}", root_cause(&e)))?;
         if let Some(other) = self.file_of(&profile.name).filter(|f| f != file) {
             bail!("{other} already has a profile named {}", profile.name);
@@ -757,9 +848,11 @@ impl ProfileSet {
         } else {
             path
         };
+        let before = std::fs::read_to_string(&target).unwrap_or_default();
         write_atomic(&target, text.as_bytes())?;
+        self.clear_types_gone(&before, text);
         info!(file, "Ecosystem profile saved");
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -776,10 +869,20 @@ impl ProfileSet {
     pub fn take_shipped(&self, file: &str) -> Result<()> {
         let dir = self.require_dir()?;
         check_file_name(file)?;
+        let _w = self.writing.lock().unwrap();
         let current = self.source(file)?;
-        let name = load_profile_str(&current)?.name;
-        let (_, src) = shipped_by_name(&name)
-            .ok_or_else(|| anyhow!("homeCore ships no profile named {name}"))?;
+        // A copy that no longer loads is the one most in need of homeCore's:
+        // by its name when it can be read, else by its file's.
+        let src = match load_profile_str(&current) {
+            Ok(p) => shipped_by_name(&p.name)
+                .map(|(_, s)| s)
+                .ok_or_else(|| anyhow!("homeCore ships no profile named {}", p.name))?,
+            Err(_) => shipped::PROFILES
+                .iter()
+                .find(|(f, _)| *f == file)
+                .map(|(_, s)| *s)
+                .ok_or_else(|| anyhow!("{file} doesn't load, and homeCore ships no {file}"))?,
+        };
         let kept = devices_of(&current);
         let next = if kept.is_empty() {
             src.to_string()
@@ -795,12 +898,13 @@ impl ProfileSet {
             path
         };
         write_atomic(&target, next.as_bytes())?;
+        self.clear_types_gone(&current, &next);
         info!(
             file,
             kept = kept.len(),
             "Profile replaced with homeCore's, devices kept"
         );
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -808,6 +912,7 @@ impl ProfileSet {
     pub fn delete(&self, file: &str) -> Result<()> {
         let dir = self.require_dir()?;
         check_file_name(file)?;
+        let _w = self.writing.lock().unwrap();
         let mut gone = false;
         for p in [dir.join(file), dir.join(format!("{file}.off"))] {
             if p.exists() {
@@ -819,7 +924,7 @@ impl ProfileSet {
             bail!("there is no {file}");
         }
         info!(file, "Ecosystem profile deleted");
-        self.reload();
+        self.reload_held();
         Ok(())
     }
 
@@ -940,6 +1045,19 @@ fn same_but_devices(a: &str, b: &str) -> bool {
     matches!((without_devices(a), without_devices(b)), (Some(x), Some(y)) if x == y)
 }
 
+/// The devices a profile gives a type.
+fn typed_devices(text: &str) -> Vec<String> {
+    devices_of(text)
+        .into_iter()
+        .filter(|d| {
+            d.device_type
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        })
+        .map(|d| d.device_id)
+        .collect()
+}
+
 /// The devices a profile names, as changes that would name them again.
 fn devices_of(text: &str) -> Vec<DeviceEntryChange> {
     load_profile_str(text)
@@ -979,6 +1097,7 @@ fn warnings(loaded: &Loaded) -> Vec<String> {
     let Some(router) = &loaded.router else {
         return out;
     };
+    out.extend(router.claimed_twice());
     let named = router.device_types_named();
     if named.is_empty() {
         return out;
@@ -1074,7 +1193,7 @@ fn z2m_type(device: &serde_json::Value) -> Option<&'static str> {
 /// A profile's text with its `[ecosystem.devices]` entries changed, keeping
 /// everything else (comments included) as it was.
 fn with_device_entries(text: &str, changes: &[DeviceEntryChange]) -> Result<String> {
-    use toml_edit::{value, DocumentMut, Item, Table};
+    use toml_edit::{value, DocumentMut, InlineTable, Item, Table};
     let mut doc: DocumentMut = text.parse().context("the profile isn't valid TOML")?;
     let eco = doc
         .get_mut("ecosystem")
@@ -1085,9 +1204,12 @@ fn with_device_entries(text: &str, changes: &[DeviceEntryChange]) -> Result<Stri
         t.set_implicit(true);
         eco.insert("devices", Item::Table(t));
     }
+    // Written by hand, either may be an inline table: `devices = { … }`,
+    // `zigbee_x = { device_type = "light" }`.
+    let inline = eco.get("devices").is_some_and(Item::is_inline_table);
     let devices = eco
         .get_mut("devices")
-        .and_then(Item::as_table_mut)
+        .and_then(Item::as_table_like_mut)
         .ok_or_else(|| anyhow!("[ecosystem.devices] isn't a table"))?;
     for c in changes {
         let device_type = c
@@ -1101,20 +1223,29 @@ fn with_device_entries(text: &str, changes: &[DeviceEntryChange]) -> Result<Stri
             continue;
         }
         if !devices.contains_key(&c.device_id) {
-            devices.insert(&c.device_id, Item::Table(Table::new()));
+            let fresh = if inline {
+                Item::Value(InlineTable::new().into())
+            } else {
+                Item::Table(Table::new())
+            };
+            devices.insert(&c.device_id, fresh);
         }
         let entry = devices
             .get_mut(&c.device_id)
-            .and_then(Item::as_table_mut)
+            .and_then(Item::as_table_like_mut)
             .ok_or_else(|| anyhow!("{}'s entry isn't a table", c.device_id))?;
         match device_type {
-            Some(t) => entry["device_type"] = value(t),
+            Some(t) => {
+                entry.insert("device_type", value(t));
+            }
             None => {
                 entry.remove("device_type");
             }
         }
         match name {
-            Some(n) => entry["name"] = value(n),
+            Some(n) => {
+                entry.insert("name", value(n));
+            }
             None => {
                 entry.remove("name");
             }
