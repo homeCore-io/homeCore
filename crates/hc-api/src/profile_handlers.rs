@@ -359,6 +359,7 @@ pub async fn get_file(
             "text": text,
             "on": status.is_some(),
             "status": status,
+            "shipped_text": set.shipped_text(&file),
         }))
         .into_response(),
         Err(e) => err(StatusCode::NOT_FOUND, format!("{e:#}")),
@@ -544,5 +545,99 @@ pub async fn remove_login(
     match logins.remove(&user) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+/// `GET /mqtt/devices/{id}`: the ecosystem a device comes in through, for its
+/// own page to link to. 404 for a device no profile takes in.
+pub async fn device_profile(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<String>,
+) -> Response {
+    let set = match admin_profiles(&s, &claims) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    let device = match s.store.get_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return err(StatusCode::NOT_FOUND, format!("no device {id}")),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let files = set.files();
+    match profile_for(&set, &files, &device) {
+        Some(name) => {
+            let file = files
+                .iter()
+                .find(|f| f.name.as_deref() == Some(&name))
+                .map(|f| f.file.clone());
+            Json(json!({ "profile": name, "file": file })).into_response()
+        }
+        None => err(StatusCode::NOT_FOUND, format!("no ecosystem takes {id} in")),
+    }
+}
+
+/// `POST /mqtt/files/{file}/shipped`: replace a copy of a shipped profile
+/// with the one this homeCore ships, keeping the devices it names.
+pub async fn take_shipped(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(file): Path<String>,
+) -> Response {
+    let set = match admin_profiles(&s, &claims) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    change_then_apply(set, move |p| {
+        p.take_shipped(&file)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(name: &str, prefix: &str) -> ProfileFileStatus {
+        ProfileFileStatus {
+            file: format!("{name}.toml"),
+            name: Some(name.into()),
+            description: None,
+            prefix: Some(prefix.into()),
+            shipped: true,
+            differs_from_shipped: false,
+            error: None,
+        }
+    }
+
+    /// A device belongs to the ecosystem it came through, else the one whose
+    /// prefix it starts with (the longest); a plugin's or core's to none.
+    #[test]
+    fn a_device_belongs_to_the_ecosystem_it_comes_in_through() {
+        let set = ProfileSet::fixed(None, None);
+        let files = vec![
+            status("shelly-gen1", "shelly_"),
+            status("shelly-plus", "shelly_plus_"),
+        ];
+        let d = |id: &str, plugin: &str| DeviceState::new(id, id, plugin);
+        assert_eq!(
+            profile_for(&set, &files, &d("shelly_plus_1", "shelly")).as_deref(),
+            Some("shelly-plus")
+        );
+        assert_eq!(
+            profile_for(&set, &files, &d("shelly_abc", "shelly")).as_deref(),
+            Some("shelly-gen1")
+        );
+        set.came_through("shelly_plus_2", &std::sync::Arc::from("shelly-gen1"));
+        assert_eq!(
+            profile_for(&set, &files, &d("shelly_plus_2", "shelly")).as_deref(),
+            Some("shelly-gen1")
+        );
+        assert_eq!(
+            profile_for(&set, &files, &d("shelly_x", "plugin.shelly")),
+            None
+        );
+        assert_eq!(profile_for(&set, &files, &d("hue_1", "hue")), None);
     }
 }

@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: homeCore API
-  version: "0.1.126"
+  version: "0.1.127"
   description: |
     homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -5423,6 +5423,48 @@ paths:
       responses:
         "200":
           description: The new password
+  /mqtt/devices/{id}:
+    get:
+      operationId: getMqttDeviceProfile
+      summary: The ecosystem a device comes in through
+      description: The profile (and its file) that takes the device in, for its page to link to. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Its ecosystem
+        "404":
+          description: No such device, or no ecosystem takes it in
+  /mqtt/files/{file}/shipped:
+    post:
+      operationId: takeShippedMqttProfile
+      summary: Take homeCore's version of a profile
+      description: |
+        Replaces a copy of a shipped profile with the one this homeCore ships,
+        keeping the devices it names in `[ecosystem.devices]` (their types and
+        names), and applies it. A profile's `differs_from_shipped` says when
+        its copy differs, devices aside. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Replaced and applied
+        "400":
+          description: homeCore ships no profile of its name
   /devices/removed:
     get:
       operationId: listRemovedDevices
