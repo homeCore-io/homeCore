@@ -547,6 +547,293 @@ impl ProfileSet {
         self.reload();
         Ok(true)
     }
+
+    // ── Turning ecosystems on and off ───────────────────────────────────────
+
+    /// Profiles turned off: `<file>.off` in the folder, kept as they were.
+    pub fn off_files(&self) -> Vec<OffProfile> {
+        let Some(dir) = self.dir.as_deref() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<OffProfile> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let file = name.strip_suffix(".off")?.to_string();
+                file.ends_with(".toml").then_some(())?;
+                let text = std::fs::read_to_string(e.path()).ok()?;
+                let profile = load_profile_str(&text).ok();
+                Some(OffProfile {
+                    file,
+                    name: profile.as_ref().map(|p| p.name.clone()),
+                    description: profile.and_then(|p| p.description),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.file.cmp(&b.file));
+        out
+    }
+
+    /// The text of a profile that isn't on: one turned off, else a shipped one
+    /// by its file name.
+    fn off_text(&self, file: &str) -> Option<String> {
+        let dir = self.dir.as_deref()?;
+        if let Ok(text) = std::fs::read_to_string(dir.join(format!("{file}.off"))) {
+            return Some(text);
+        }
+        shipped::PROFILES
+            .iter()
+            .find(|(f, _)| *f == file)
+            .map(|(_, src)| src.to_string())
+    }
+
+    /// What turning `file` on would take in from what the broker carries now:
+    /// each device it would make, with the type the profile gives it.
+    pub fn preview(&self, file: &str) -> Result<Vec<PreviewDevice>> {
+        let text = self
+            .off_text(file)
+            .ok_or_else(|| anyhow!("no profile {file} to turn on"))?;
+        let profile = load_profile_str(&text)?;
+        let router = EcosystemRouter::with_scripts(vec![profile], &[]);
+        let heard: Vec<HeardTopic> = self.heard.lock().unwrap().values().cloned().collect();
+        let mut out: Vec<PreviewDevice> = Vec::new();
+        for h in heard {
+            if let Ok(Some(InboundResult::State {
+                device_id, device, ..
+            })) = router.route_inbound(&h.topic, h.last_payload.as_bytes())
+            {
+                let device_type = device.as_ref().and_then(|d| d.device_type.clone());
+                let name = device.and_then(|d| d.name);
+                match out.iter_mut().find(|p| p.device_id == device_id) {
+                    Some(p) => {
+                        p.device_type = p.device_type.take().or(device_type);
+                        p.name = p.name.take().or(name);
+                    }
+                    None => out.push(PreviewDevice {
+                        device_id,
+                        device_type,
+                        name,
+                    }),
+                }
+            }
+        }
+        out.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        Ok(out)
+    }
+
+    /// Turn a profile on: one turned off comes back as it was; a shipped one
+    /// is copied in, with the transforms it uses and the device type catalog
+    /// when the folder lacks them. Applies at once.
+    pub fn turn_on(&self, file: &str) -> Result<()> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(file);
+        if path.exists() {
+            bail!("{file} is already on");
+        }
+        let off = dir.join(format!("{file}.off"));
+        if off.exists() {
+            std::fs::rename(&off, &path)?;
+        } else {
+            let src = shipped::PROFILES
+                .iter()
+                .find(|(f, _)| *f == file)
+                .map(|(_, s)| *s)
+                .ok_or_else(|| anyhow!("homeCore ships no {file}"))?;
+            let name = load_profile_str(src)?.name;
+            if self.file_of(&name).is_some() {
+                bail!("a profile named {name} is already on");
+            }
+            write_atomic(&path, src.as_bytes())?;
+            for (t, body) in shipped::TRANSFORMS {
+                let tp = dir.join(t);
+                if !tp.exists() {
+                    write_atomic(&tp, body.as_bytes())?;
+                }
+            }
+        }
+        let catalog = dir.join("device-types.toml");
+        if !catalog.exists() {
+            write_atomic(&catalog, shipped::DEVICE_TYPES.as_bytes())?;
+        }
+        info!(file, "Ecosystem profile turned on");
+        self.reload();
+        Ok(())
+    }
+
+    /// Turn a profile off: it stays in the folder as `<file>.off`, changes and
+    /// all, to turn on again. Its devices stay; they stop being updated.
+    pub fn turn_off(&self, file: &str) -> Result<()> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        let path = dir.join(file);
+        if !path.exists() {
+            bail!("{file} isn't on");
+        }
+        std::fs::rename(&path, dir.join(format!("{file}.off")))?;
+        info!(file, "Ecosystem profile turned off");
+        self.reload();
+        Ok(())
+    }
+
+    // ── Editing a profile ───────────────────────────────────────────────────
+
+    /// A profile file's text, on or off.
+    pub fn source(&self, file: &str) -> Result<String> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        let path = dir.join(file);
+        if path.exists() {
+            return Ok(std::fs::read_to_string(path)?);
+        }
+        self.off_text(file)
+            .ok_or_else(|| anyhow!("there is no {file}"))
+    }
+
+    /// Save a profile file, new or changed, and apply it. Refused, and the file
+    /// left as it was, when it doesn't load or its name is another profile's.
+    pub fn save(&self, file: &str, text: &str) -> Result<()> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        let profile = load_profile_str(text).map_err(|e| anyhow!("{}", root_cause(&e)))?;
+        if let Some(other) = self.file_of(&profile.name).filter(|f| f != file) {
+            bail!("{other} already has a profile named {}", profile.name);
+        }
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(file);
+        let off = dir.join(format!("{file}.off"));
+        // Saving a profile that is off saves it off.
+        let target = if !path.exists() && off.exists() {
+            off
+        } else {
+            path
+        };
+        write_atomic(&target, text.as_bytes())?;
+        info!(file, "Ecosystem profile saved");
+        self.reload();
+        Ok(())
+    }
+
+    /// Delete a profile file, on or off. Its devices stay.
+    pub fn delete(&self, file: &str) -> Result<()> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        let mut gone = false;
+        for p in [dir.join(file), dir.join(format!("{file}.off"))] {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+                gone = true;
+            }
+        }
+        if !gone {
+            bail!("there is no {file}");
+        }
+        info!(file, "Ecosystem profile deleted");
+        self.reload();
+        Ok(())
+    }
+
+    /// What a profile's text would make of one message: the device, its
+    /// state, and what the profile says it is. For trying a profile before
+    /// saving it.
+    pub fn try_message(&self, text: &str, topic: &str, payload: &[u8]) -> Result<TryResult> {
+        let profile = load_profile_str(text).map_err(|e| anyhow!("{}", root_cause(&e)))?;
+        let scripts = self
+            .dir
+            .as_deref()
+            .map(|d| load_transforms_from_dir(&d.to_string_lossy()))
+            .unwrap_or_default();
+        let router = EcosystemRouter::with_scripts(vec![profile], &scripts);
+        Ok(match router.route_inbound(topic, payload) {
+            Ok(Some(InboundResult::State {
+                device_id,
+                payload,
+                partial,
+                device,
+                ..
+            })) => TryResult::State {
+                device_id,
+                state: payload,
+                partial,
+                device_type: device.as_ref().and_then(|d| d.device_type.clone()),
+                name: device.and_then(|d| d.name),
+            },
+            Ok(Some(InboundResult::Availability {
+                device_id,
+                available,
+                ..
+            })) => TryResult::Availability {
+                device_id,
+                available,
+            },
+            Ok(None) => TryResult::NoMatch,
+            Err(e) => TryResult::Error {
+                error: format!("{e:#}"),
+            },
+        })
+    }
+}
+
+/// A profile turned off.
+#[derive(Debug, Clone, Serialize)]
+pub struct OffProfile {
+    pub file: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A device a profile would make, turned on now.
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewDevice {
+    pub device_id: String,
+    pub device_type: Option<String>,
+    pub name: Option<String>,
+}
+
+/// What a profile makes of one message.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TryResult {
+    State {
+        device_id: String,
+        state: serde_json::Value,
+        partial: bool,
+        device_type: Option<String>,
+        name: Option<String>,
+    },
+    Availability {
+        device_id: String,
+        available: bool,
+    },
+    NoMatch,
+    Error {
+        error: String,
+    },
+}
+
+/// A profile file's name: `<word>.toml`, nothing that leaves the folder, and
+/// not the catalog.
+fn check_file_name(file: &str) -> Result<()> {
+    let ok = file.ends_with(".toml")
+        && file.len() > 5
+        && file != "device-types.toml"
+        && !file.starts_with('.')
+        && file
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !ok {
+        bail!("{file} isn't a profile file name (letters, digits, - and _, ending .toml)");
+    }
+    Ok(())
+}
+
+/// The innermost reason, which for a TOML error is the one with the line.
+fn root_cause(e: &anyhow::Error) -> String {
+    e.chain().last().map(|c| c.to_string()).unwrap_or_default()
 }
 
 fn empty() -> Loaded {
@@ -847,6 +1134,98 @@ attribute = "on"
         assert_eq!(heard[0].last_payload, "off");
         assert_eq!(heard[0].looks_like.as_deref(), Some("shelly-gen1"));
         assert_eq!(heard[1].looks_like, None);
+    }
+
+    #[test]
+    fn a_shipped_ecosystem_turns_on_with_a_preview_and_off_keeping_its_changes() {
+        let (d, set) = folder();
+        set.heard_unmatched("shellies/shelly1-98CDAC/relay/0", b"on");
+        let preview = set.preview("shelly-gen1.toml").unwrap();
+        assert_eq!(preview.len(), 1, "{preview:?}");
+        assert_eq!(preview[0].device_id, "shelly_shelly1-98CDAC_relay0");
+        assert_eq!(preview[0].device_type.as_deref(), Some("switch"));
+
+        set.turn_on("shelly-gen1.toml").unwrap();
+        assert!(
+            d.path().join("device-types.toml").exists(),
+            "the catalog comes with it"
+        );
+        assert!(set
+            .files()
+            .iter()
+            .any(|f| f.name.as_deref() == Some("shelly-gen1")));
+        assert!(set.shipped_off().iter().all(|s| s.name != "shelly-gen1"));
+        assert!(set.turn_on("shelly-gen1.toml").is_err(), "already on");
+
+        // Changed, turned off, turned on: the change is still there.
+        let text = set.source("shelly-gen1.toml").unwrap() + "\n# mine\n";
+        set.save("shelly-gen1.toml", &text).unwrap();
+        set.turn_off("shelly-gen1.toml").unwrap();
+        assert!(set.files().iter().all(|f| f.file != "shelly-gen1.toml"));
+        assert_eq!(set.off_files()[0].file, "shelly-gen1.toml");
+        set.turn_on("shelly-gen1.toml").unwrap();
+        assert!(set
+            .source("shelly-gen1.toml")
+            .unwrap()
+            .ends_with("# mine\n"));
+    }
+
+    #[test]
+    fn a_profile_is_saved_only_when_it_loads_and_its_name_is_its_own() {
+        let (d, set) = folder();
+        let err = set
+            .save("plugs.toml", "[ecosystem]\nname = \n")
+            .unwrap_err();
+        assert!(err.to_string().contains("line"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("plugs.toml")).unwrap(),
+            PLUG
+        );
+
+        let err = set.save("other.toml", PLUG).unwrap_err();
+        assert!(err.to_string().contains("plugs.toml"), "{err}");
+        assert!(set.save("../escape.toml", PLUG).is_err());
+        assert!(set.save("device-types.toml", PLUG).is_err());
+
+        let mine = PLUG
+            .replace("\"plugs\"", "\"sockets\"")
+            .replace("plug_", "sock_");
+        set.save("sockets.toml", &mine).unwrap();
+        assert!(set.file_of("sockets").is_some());
+        set.delete("sockets.toml").unwrap();
+        assert!(set.file_of("sockets").is_none());
+        assert!(!d.path().join("sockets.toml").exists());
+    }
+
+    #[test]
+    fn trying_a_profile_on_a_message_says_what_it_would_make() {
+        let (_d, set) = folder();
+        let text = format!("{PLUG}device_type = \"switch\"\nname = \"Plug {{device}}\"\n");
+        match set
+            .try_message(&text, "plugs/kettle/power", b"true")
+            .unwrap()
+        {
+            TryResult::State {
+                device_id,
+                state,
+                device_type,
+                name,
+                ..
+            } => {
+                assert_eq!(device_id, "plug_kettle");
+                assert_eq!(state["on"], serde_json::json!(true));
+                assert_eq!(device_type.as_deref(), Some("switch"));
+                assert_eq!(name.as_deref(), Some("Plug kettle"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            set.try_message(&text, "elsewhere/x", b"1").unwrap(),
+            TryResult::NoMatch
+        ));
+        assert!(set
+            .try_message("[ecosystem", "plugs/x/power", b"1")
+            .is_err());
     }
 
     #[test]

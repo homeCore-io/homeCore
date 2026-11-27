@@ -91,7 +91,10 @@ impl Harness {
             // A profiles folder of its own; empty unless the test writes one.
             .with_profiles(hc_core::profiles::ProfileSet::load(
                 tmp.path().join("profiles"),
-            ));
+            ))
+            .with_mqtt_logins(std::sync::Arc::new(hc_api::mqtt_logins::DeviceLogins::new(
+                tmp.path().join("profiles"),
+            )));
 
         let tcp_port = free_port();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

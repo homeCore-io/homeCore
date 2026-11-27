@@ -47,6 +47,7 @@ pub mod managed_plugins;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod mqtt_logins;
 pub mod placement;
 pub mod plugin_access;
 pub mod plugin_config_store;
@@ -453,6 +454,8 @@ pub struct AppState {
     /// The ecosystem profiles, for Settings › Devices over MQTT. `None` when
     /// homeCore was started without them (tests).
     pub profiles: Option<Arc<hc_core::profiles::ProfileSet>>,
+    /// Logins for devices that connect to the broker themselves.
+    pub mqtt_logins: Option<Arc<mqtt_logins::DeviceLogins>>,
     /// Sender on the graceful-shutdown channel. Held by AppState so
     /// the `POST /system/restart` handler can request a clean exit;
     /// the runtime supervisor (systemd / docker / hand-rolled) is
@@ -945,6 +948,7 @@ impl AppState {
             unit_conversions: Default::default(),
             homecore_config_path: None,
             profiles: None,
+            mqtt_logins: None,
             shutdown_tx: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1083,6 +1087,12 @@ impl AppState {
     /// Attach the homecore.toml path so handlers can write runtime
     /// changes back to disk (currently used by the plugin
     /// enable/disable toggle in PATCH /plugins/{id}).
+    /// Logins for devices that connect to the broker themselves.
+    pub fn with_mqtt_logins(mut self, logins: Arc<mqtt_logins::DeviceLogins>) -> Self {
+        self.mqtt_logins = Some(logins);
+        self
+    }
+
     /// The ecosystem profiles the app manages.
     pub fn with_profiles(mut self, profiles: Arc<hc_core::profiles::ProfileSet>) -> Self {
         self.profiles = Some(profiles);
@@ -1318,6 +1328,28 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/mqtt/device-types", get(profile_handlers::device_types))
         .route("/mqtt/catalog", post(profile_handlers::add_catalog))
         .route("/mqtt/reload", post(profile_handlers::reload))
+        .route("/mqtt/on", post(profile_handlers::turn_on))
+        .route("/mqtt/off", post(profile_handlers::turn_off))
+        .route("/mqtt/preview", get(profile_handlers::preview))
+        .route("/mqtt/try", post(profile_handlers::try_message))
+        .route(
+            "/mqtt/files/{file}",
+            get(profile_handlers::get_file)
+                .put(profile_handlers::put_file)
+                .delete(profile_handlers::delete_file),
+        )
+        .route(
+            "/mqtt/logins",
+            get(profile_handlers::list_logins).post(profile_handlers::add_login),
+        )
+        .route(
+            "/mqtt/logins/{user}",
+            delete(profile_handlers::remove_login),
+        )
+        .route(
+            "/mqtt/logins/{user}/password",
+            post(profile_handlers::reset_login),
+        )
         .route("/devices/removed", get(handlers::list_removed_devices))
         .route("/devices/removed/{id}", delete(handlers::bring_back_device))
         .route(

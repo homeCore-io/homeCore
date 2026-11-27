@@ -785,6 +785,9 @@ async fn main() -> Result<()> {
     // devices in, and so the app can show what the broker carries that no
     // profile takes in.
     let profile_set = hc_core::profiles::ProfileSet::load(&config.profiles.dir);
+    // Logins for devices that connect to the broker themselves, beside the
+    // profiles: the broker checks them live, the app makes them.
+    let device_logins = Arc::new(hc_api::mqtt_logins::DeviceLogins::new(&config.profiles.dir));
     mqtt_client.add_subscription("#");
     core = core.with_profiles(Arc::clone(&profile_set));
 
@@ -864,6 +867,7 @@ async fn main() -> Result<()> {
     let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
     let _ = live_logins.set(hc_api::plugin_runtimes::BrokerLogins {
         runtimes: store.plugin_runtimes(),
+        devices: Some(Arc::clone(&device_logins)),
         config_plugins_dir: install_base.join("config").join("plugins"),
         listed: config
             .plugins
@@ -1291,6 +1295,7 @@ async fn main() -> Result<()> {
     }
     .with_backup_paths(backup_paths)
     .with_profiles(Arc::clone(&profile_set))
+    .with_mqtt_logins(Arc::clone(&device_logins))
     .with_fire_history(fire_history)
     .with_hub_vars(hub_vars)
     .with_pauses(pauses)
