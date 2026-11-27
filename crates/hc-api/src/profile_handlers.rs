@@ -159,6 +159,7 @@ pub async fn profile(
                 "device_type": d.device_type,
                 "configured": configured.get(&d.device_id),
                 "suggestion": set.suggestion(&d.device_id),
+                "suggested_name": set.suggested_name(&d.device_id),
                 "available": d.available,
                 "last_seen": d.last_seen,
                 "readings": readings(d),
@@ -191,9 +192,16 @@ pub async fn set_devices(
     if body.changes.is_empty() {
         return err(StatusCode::BAD_REQUEST, "no changes");
     }
-    let result = tokio::task::spawn_blocking(move || set.set_devices(&name, &body.changes)).await;
+    let writer = Arc::clone(&set);
+    let result =
+        tokio::task::spawn_blocking(move || writer.set_devices(&name, &body.changes)).await;
     match result {
-        Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(())) => {
+            // Answer once the devices show it, so the app reads them changed.
+            set.applied(set.generation(), std::time::Duration::from_secs(3))
+                .await;
+            Json(json!({ "ok": true })).into_response()
+        }
         Ok(Err(e)) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }

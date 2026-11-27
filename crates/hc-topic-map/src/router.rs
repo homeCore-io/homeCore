@@ -177,6 +177,25 @@ impl EcosystemRouter {
         out
     }
 
+    /// The first topic level of every loaded profile's topics, where it is a
+    /// fixed word (`zigbee2mqtt`, `stat`, `shellies`): the roots of the
+    /// ecosystems that are on.
+    pub fn topic_roots(&self) -> Vec<String> {
+        let mut roots: Vec<String> = self
+            .state_entries
+            .iter()
+            .map(|e| &e.segments)
+            .chain(self.availability_entries.iter().map(|e| &e.segments))
+            .filter_map(|s| match s.first() {
+                Some(Segment::Literal(l)) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     /// Every device type a loaded profile names, on a topic or for one device,
     /// sorted and once each.
     pub fn device_types_named(&self) -> Vec<String> {

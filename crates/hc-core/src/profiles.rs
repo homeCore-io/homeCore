@@ -99,8 +99,13 @@ pub struct ProfileSet {
     /// Device ID → the profile it came through, this session.
     came_through: Mutex<HashMap<String, Arc<str>>>,
     /// Device ID → the type Zigbee2MQTT says it is.
-    suggestions: Mutex<HashMap<String, String>>,
+    suggestions: Mutex<HashMap<String, (String, Option<String>)>>,
+    /// Devices whose type was just taken out of a profile, for the bridge to
+    /// take off the device too.
+    cleared: Mutex<Vec<String>>,
     changes: watch::Sender<u64>,
+    /// The last reload the state bridge has applied.
+    applied: watch::Sender<u64>,
 }
 
 impl ProfileSet {
@@ -135,7 +140,9 @@ impl ProfileSet {
             heard: Mutex::new(HashMap::new()),
             came_through: Mutex::new(HashMap::new()),
             suggestions: Mutex::new(HashMap::new()),
+            cleared: Mutex::new(Vec::new()),
             changes: watch::channel(0).0,
+            applied: watch::channel(0).0,
         }
     }
 
@@ -299,6 +306,16 @@ impl ProfileSet {
         if topic.starts_with("homecore/") || topic.starts_with('$') {
             return;
         }
+        // A topic under an ecosystem that is on (Zigbee2MQTT's own `bridge/`
+        // topics, a Tasmota topic its profile doesn't use) is that ecosystem's
+        // business, not a device homeCore is missing.
+        let root = topic.split('/').next().unwrap_or_default();
+        if self
+            .router()
+            .is_some_and(|r| r.topic_roots().iter().any(|x| x == root))
+        {
+            return;
+        }
         let now = Utc::now();
         let text: String = String::from_utf8_lossy(payload)
             .chars()
@@ -403,7 +420,7 @@ impl ProfileSet {
             if let Ok(Some(InboundResult::State { device_id, .. })) =
                 router.route_inbound(&format!("{base}/{friendly}"), b"{}")
             {
-                found.insert(device_id, kind.to_string());
+                found.insert(device_id, (kind.to_string(), friendly_name(friendly)));
             }
         }
         if !found.is_empty() {
@@ -414,7 +431,20 @@ impl ProfileSet {
 
     /// What a device is, as its ecosystem says, when it says.
     pub fn suggestion(&self, device_id: &str) -> Option<String> {
-        self.suggestions.lock().unwrap().get(device_id).cloned()
+        self.suggestions
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .map(|s| s.0.clone())
+    }
+
+    /// The name its ecosystem gives a device, when it gives one worth showing.
+    pub fn suggested_name(&self, device_id: &str) -> Option<String> {
+        self.suggestions
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .and_then(|s| s.1.clone())
     }
 
     // ── Changing the folder ─────────────────────────────────────────────────
@@ -459,9 +489,48 @@ impl ProfileSet {
         let next = with_device_entries(&text, changes)?;
         load_profile_str(&next).context("the change would make the profile not load")?;
         write_atomic(&path, next.as_bytes()).with_context(|| format!("writing {file}"))?;
+        self.cleared.lock().unwrap().extend(
+            changes
+                .iter()
+                .filter(|c| c.device_type.as_deref().is_none_or(|t| t.trim().is_empty()))
+                .map(|c| c.device_id.clone()),
+        );
         info!(profile, file = %file, changes = changes.len(), "Profile devices changed");
         self.reload();
         Ok(())
+    }
+
+    /// How many reloads there have been.
+    pub fn generation(&self) -> u64 {
+        *self.changes.borrow()
+    }
+
+    /// The state bridge has applied everything up to `generation`.
+    pub fn mark_applied(&self, generation: u64) {
+        self.applied.send_if_modified(|n| {
+            let newer = generation > *n;
+            if newer {
+                *n = generation;
+            }
+            newer
+        });
+    }
+
+    /// Wait (up to `timeout`) until the state bridge has applied reload
+    /// `generation`, so a change made from the app shows on its devices by
+    /// the time the app reads them again. Returns at once when no bridge is
+    /// listening.
+    pub async fn applied(&self, generation: u64, timeout: std::time::Duration) {
+        if self.changes.receiver_count() == 0 {
+            return;
+        }
+        let mut rx = self.applied.subscribe();
+        let _ = tokio::time::timeout(timeout, rx.wait_for(|n| *n >= generation)).await;
+    }
+
+    /// The devices whose type was taken out of a profile since last asked.
+    pub fn take_cleared(&self) -> Vec<String> {
+        std::mem::take(&mut *self.cleared.lock().unwrap())
     }
 
     /// Put homeCore's device type catalog in the profiles folder, if it has
@@ -525,6 +594,19 @@ fn warnings(loaded: &Loaded) -> Vec<String> {
         }
     }
     out
+}
+
+/// A Zigbee2MQTT friendly name as a name for people: `back_door` → "Back door".
+/// None for one Zigbee2MQTT made up from the address (`0x00158d0004a1`).
+fn friendly_name(friendly: &str) -> Option<String> {
+    if friendly.starts_with("0x") {
+        return None;
+    }
+    let words = friendly.replace(['_', '-'], " ");
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = words.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
 }
 
 /// What a Zigbee2MQTT device is, from what its definition exposes.
@@ -705,6 +787,28 @@ attribute = "on"
         assert!(set.router().unwrap().configured_devices().is_empty());
     }
 
+    #[tokio::test]
+    async fn the_app_waits_for_the_bridge_only_when_one_listens() {
+        let (_d, set) = folder();
+        let started = std::time::Instant::now();
+        // Nobody listening: at once.
+        set.applied(set.generation() + 1, std::time::Duration::from_secs(5))
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        // A listener that applies it: as soon as it does.
+        let _listening = set.subscribe();
+        let target = set.generation() + 1;
+        let marker = Arc::clone(&set);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            marker.mark_applied(target);
+        });
+        let started = std::time::Instant::now();
+        set.applied(target, std::time::Duration::from_secs(5)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     #[test]
     fn a_type_the_catalog_lacks_changes_nothing() {
         let (d, set) = folder();
@@ -734,6 +838,8 @@ attribute = "on"
         set.heard_unmatched("shellies/shelly1-98CDAC/relay/0", b"off");
         set.heard_unmatched("esphome/garage/state", b"closed");
         set.heard_unmatched("homecore/devices/x/state", b"{}");
+        // Under an ecosystem that is on: its business, not a missing device.
+        set.heard_unmatched("plugs/kettle/firmware", b"1.2");
         let heard = set.heard_since(Utc::now() - chrono::Duration::hours(1));
         assert_eq!(heard.len(), 2);
         assert_eq!(heard[0].topic, "shellies/shelly1-98CDAC/relay/0");
@@ -775,6 +881,14 @@ attribute = "on"
         assert_eq!(
             set.suggestion("zigbee_back_door").as_deref(),
             Some("contact_sensor")
+        );
+        assert_eq!(
+            set.suggested_name("zigbee_back_door").as_deref(),
+            Some("Back door")
+        );
+        assert_eq!(
+            set.suggested_name("zigbee_living_room_light").as_deref(),
+            Some("Living room light")
         );
         assert_eq!(
             set.suggestion("zigbee_kitchen_plug").as_deref(),

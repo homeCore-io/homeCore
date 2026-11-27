@@ -799,7 +799,39 @@ impl StateBridge {
     /// now say about named devices to those that exist, so a change made in
     /// the app shows at once instead of on the device's next report.
     async fn profiles_changed(&self) {
+        let generation = self.profiles.as_ref().map(|p| p.generation());
+        self.apply_profiles().await;
+        if let (Some(p), Some(g)) = (&self.profiles, generation) {
+            p.mark_applied(g);
+        }
+    }
+
+    async fn apply_profiles(&self) {
         self.described_profile_devices.lock().unwrap().clear();
+        // A type taken out of a profile comes off the device: it shows its
+        // readings and no controls again (until a topic that names a type
+        // reports for it).
+        let cleared = self
+            .profiles
+            .as_ref()
+            .map(|p| p.take_cleared())
+            .unwrap_or_default();
+        for device_id in cleared {
+            if let Ok(Some(mut d)) = self.store.get_device(&device_id).await {
+                if d.device_type.take().is_some() {
+                    if let Err(e) = self.store.upsert_device(&d).await {
+                        warn!(device_id, error = %e, "Could not take a device's type off");
+                        continue;
+                    }
+                    let _ = self.store.delete_device_schema(&device_id).await;
+                    self.units.remove(&device_id);
+                    info!(
+                        device_id,
+                        "Device type taken off; its profile no longer names one"
+                    );
+                }
+            }
+        }
         let Some(router) = self.router() else {
             return;
         };
@@ -2158,6 +2190,25 @@ mod profile_device_tests {
             .await
             .unwrap()
             .is_some());
+
+        // Saying it is nothing takes the type and its schema off again.
+        set.set_devices(
+            "plugs",
+            &[crate::profiles::DeviceEntryChange {
+                device_id: "plug_kettle".into(),
+                device_type: None,
+                name: Some("Kettle".into()),
+            }],
+        )
+        .unwrap();
+        bridge.profiles_changed().await;
+        let kettle = store.get_device("plug_kettle").await.unwrap().unwrap();
+        assert_eq!(kettle.device_type, None);
+        assert!(store
+            .get_device_schema("plug_kettle")
+            .await
+            .unwrap()
+            .is_none());
 
         bridge
             .handle_mqtt("esphome/garage/state", b"closed")
