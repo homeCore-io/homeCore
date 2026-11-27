@@ -142,6 +142,9 @@ pub struct ProfileSet {
     /// the app (two quick device changes, a save while turning on) neither
     /// lose one another's edit nor swap in a reload older than the folder.
     writing: Mutex<()>,
+    /// Topics homeCore itself published a command to: heard back from the
+    /// broker, they are not a device it is missing.
+    relayed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProfileSet {
@@ -180,6 +183,7 @@ impl ProfileSet {
             changes: watch::channel(0).0,
             applied: watch::channel(0).0,
             writing: Mutex::new(()),
+            relayed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -365,10 +369,22 @@ impl ProfileSet {
         self.came_through.lock().unwrap().get(device_id).cloned()
     }
 
+    /// Note a topic homeCore relayed a command to.
+    pub fn relayed(&self, topic: &str) {
+        let mut set = self.relayed.lock().unwrap();
+        if set.len() >= HEARD_CAP && !set.contains(topic) {
+            set.clear();
+        }
+        set.insert(topic.to_string());
+    }
+
     /// Note a topic no profile took in. homeCore's own topics, and the
     /// broker's, are not someone's devices and aren't kept.
     pub fn heard_unmatched(&self, topic: &str, payload: &[u8]) {
         if topic.starts_with("homecore/") || topic.starts_with('$') {
+            return;
+        }
+        if self.relayed.lock().unwrap().contains(topic) {
             return;
         }
         // A topic under an ecosystem that is on (Zigbee2MQTT's own `bridge/`
@@ -1081,6 +1097,7 @@ fn warnings(loaded: &Loaded) -> Vec<String> {
     let Some(router) = &loaded.router else {
         return out;
     };
+    out.extend(router.claimed_twice());
     let named = router.device_types_named();
     if named.is_empty() {
         return out;

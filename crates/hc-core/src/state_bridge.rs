@@ -209,6 +209,9 @@ impl StateBridge {
                     Ok(Some(results)) => {
                         for result in results {
                             debug!(from = topic, to = %result.target_topic, "Relaying cmd to native topic");
+                            if let Some(p) = &self.profiles {
+                                p.relayed(&result.target_topic);
+                            }
                             if let Some(ph) = &self.publish {
                                 if let Err(e) =
                                     ph.publish(&result.target_topic, result.payload).await

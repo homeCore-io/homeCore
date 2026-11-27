@@ -189,6 +189,53 @@ impl EcosystemRouter {
         out
     }
 
+    /// Topics two profiles both claim, in words: the first profile (in the
+    /// order the folder lists them) takes such a topic, and the other never
+    /// sees it, which is otherwise silent.
+    pub fn claimed_twice(&self) -> Vec<String> {
+        fn pairs<'a>(
+            entries: impl Iterator<Item = (&'a Arc<str>, &'a [Segment], &'a str)> + Clone,
+            what: &str,
+            out: &mut Vec<String>,
+        ) {
+            let all: Vec<_> = entries.collect();
+            for (i, (pa, sa, ta)) in all.iter().enumerate() {
+                for (pb, sb, tb) in &all[i + 1..] {
+                    if pa != pb && crate::pattern::patterns_overlap(sa, sb) {
+                        out.push(format!(
+                            "{pa}'s {what} topic {ta} and {pb}'s {tb} can match the same topic; \
+                             {pa} takes it, and {pb} never sees it"
+                        ));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        pairs(
+            self.state_entries.iter().map(|e| {
+                (
+                    &e.profile_name,
+                    e.segments.as_slice(),
+                    e.config.pattern.as_str(),
+                )
+            }),
+            "state",
+            &mut out,
+        );
+        pairs(
+            self.availability_entries.iter().map(|e| {
+                (
+                    &e.profile_name,
+                    e.segments.as_slice(),
+                    e.config.pattern.as_str(),
+                )
+            }),
+            "availability",
+            &mut out,
+        );
+        out
+    }
+
     /// The first topic level of every loaded profile's topics, where it is a
     /// fixed word (`zigbee2mqtt`, `stat`, `shellies`): the roots of the
     /// ecosystems that are on.

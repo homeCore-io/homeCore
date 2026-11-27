@@ -53,6 +53,28 @@ pub struct DeviceLogins {
     clients: Mutex<HashMap<String, String>>,
     /// Writes one at a time.
     write: Mutex<()>,
+    /// What a login last connected with, as a SHA-256 of user and password,
+    /// so a device that reconnects (every few seconds, on a poor link) isn't
+    /// hashed with Argon2 each time. Gone when its password changes.
+    verified: Mutex<HashMap<String, [u8; 32]>>,
+    /// Argon2 checks running now. More than a few at once is a flood of
+    /// guesses, not devices, and is refused rather than queued.
+    checking: std::sync::atomic::AtomicUsize,
+    /// Names homeCore's own clients and plugins log in with, which a device
+    /// login can't take: whichever the broker checked first would win.
+    taken: std::sync::OnceLock<Box<dyn Fn(&str) -> bool + Send + Sync>>,
+}
+
+/// At most this many Argon2 checks of a device login at once.
+const CHECKS_AT_ONCE: usize = 2;
+
+fn fingerprint(user: &str, pass: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(user.as_bytes());
+    h.update([0]);
+    h.update(pass.as_bytes());
+    h.finalize().into()
 }
 
 /// A login's user name: what a device types in, so plain.
@@ -83,6 +105,9 @@ impl DeviceLogins {
             last: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
             write: Mutex::new(()),
+            verified: Mutex::new(HashMap::new()),
+            checking: std::sync::atomic::AtomicUsize::new(0),
+            taken: std::sync::OnceLock::new(),
         }
     }
 
@@ -148,9 +173,18 @@ impl DeviceLogins {
         out
     }
 
+    /// Say which names are homeCore's own clients' and plugins', for no
+    /// device login to take.
+    pub fn set_taken(&self, taken: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        let _ = self.taken.set(Box::new(taken));
+    }
+
     /// Make a login; returns its password, which is not kept anywhere.
     pub fn add(&self, profile: &str, user: &str, label: &str) -> Result<String> {
         check_user(user)?;
+        if self.taken.get().is_some_and(|t| t(user)) {
+            bail!("{user} is a name homeCore or one of its plugins logs in with");
+        }
         let _w = self.write.lock().unwrap();
         let mut file = self.read_for_change()?;
         if file.login.iter().any(|l| l.user == user) {
@@ -180,6 +214,7 @@ impl DeviceLogins {
         let password = crate::plugin_runtimes::mint_mqtt_password();
         l.hash = hc_auth::api_key::hash_token(&password)?;
         self.store(&file)?;
+        self.verified.lock().unwrap().remove(user);
         Ok(password)
     }
 
@@ -193,6 +228,7 @@ impl DeviceLogins {
         }
         self.store(&file)?;
         self.last.lock().unwrap().remove(user);
+        self.verified.lock().unwrap().remove(user);
         Ok(())
     }
 
@@ -201,12 +237,32 @@ impl DeviceLogins {
         if pass.is_empty() || check_user(user).is_err() {
             return false;
         }
-        let ok = self
-            .read()
-            .login
-            .iter()
-            .find(|l| l.user == user)
-            .is_some_and(|l| hc_auth::api_key::verify_token(pass, &l.hash));
+        let print = fingerprint(user, pass);
+        let ok = if self.verified.lock().unwrap().get(user) == Some(&print) {
+            // Removed since? The file still names it.
+            self.read().login.iter().any(|l| l.user == user)
+        } else {
+            use std::sync::atomic::Ordering;
+            if self.checking.fetch_add(1, Ordering::SeqCst) >= CHECKS_AT_ONCE {
+                self.checking.fetch_sub(1, Ordering::SeqCst);
+                warn!(user, "device login refused: too many being checked at once");
+                return false;
+            }
+            let ok = self
+                .read()
+                .login
+                .iter()
+                .find(|l| l.user == user)
+                .is_some_and(|l| hc_auth::api_key::verify_token(pass, &l.hash));
+            self.checking.fetch_sub(1, Ordering::SeqCst);
+            if ok {
+                self.verified
+                    .lock()
+                    .unwrap()
+                    .insert(user.to_string(), print);
+            }
+            ok
+        };
         if ok {
             self.last
                 .lock()
@@ -293,6 +349,8 @@ mod tests {
     fn a_login_can_t_take_a_name_that_is_homecore_s_or_already_taken() {
         let dir = tempfile::tempdir().unwrap();
         let logins = DeviceLogins::new(dir.path());
+        logins.set_taken(|n| n == "zigbee-bridge");
+        assert!(logins.add("x", "zigbee-bridge", "").is_err());
         assert!(logins.add("x", "plugin.hue", "").is_err());
         assert!(logins.add("x", "internal.core", "").is_err());
         assert!(logins.add("x", "has space", "").is_err());

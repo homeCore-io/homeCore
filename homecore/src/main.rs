@@ -886,6 +886,15 @@ async fn main() -> Result<()> {
             })
             .collect(),
     });
+    // A device login takes no name a configured client or a plugin logs in with.
+    {
+        let fixed: Vec<String> = config.broker.clients.iter().map(|c| c.id.clone()).collect();
+        let live = live_logins.clone();
+        device_logins.set_taken(move |name| {
+            fixed.iter().any(|f| f == name)
+                || live.get().is_some_and(|l| l.is_reserved_client_id(name))
+        });
+    }
     // Channel: the install handler pushes a freshly-installed plugin here and a
     // listener (below) spawns it into the running supervisor — no restart.
     let (plugin_spawn_tx, mut plugin_spawn_rx) =

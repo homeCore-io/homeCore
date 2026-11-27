@@ -181,7 +181,12 @@ impl BrokerLogins {
         if let Ok(Some(rt)) = self.runtimes.by_plugin_id(user) {
             return hc_auth::api_key::verify_token(pass, &rt.key_hash);
         }
-        if let Some(devices) = self.devices.as_ref().filter(|d| d.has(user)) {
+        // A device login made before a plugin took its name gives way to the plugin.
+        if let Some(devices) = self
+            .devices
+            .as_ref()
+            .filter(|d| d.has(user) && !self.is_reserved_client_id(user))
+        {
             // A device takes no client id of homeCore's or a plugin's: the
             // broker drops whoever holds an id when another connects with it.
             if self.is_reserved_client_id(client_id) {
@@ -207,7 +212,7 @@ impl BrokerLogins {
     }
 
     /// A client id homeCore or one of its plugins connects as.
-    fn is_reserved_client_id(&self, id: &str) -> bool {
+    pub fn is_reserved_client_id(&self, id: &str) -> bool {
         ["plugin.", "internal.", "core."]
             .iter()
             .any(|p| id.starts_with(p))

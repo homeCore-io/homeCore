@@ -112,6 +112,38 @@ pub fn render_template(template: &str, vars: &HashMap<String, String>) -> String
     result
 }
 
+/// Whether some topic matches both patterns.
+pub fn patterns_overlap(a: &[Segment], b: &[Segment]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| segments_overlap(x, y))
+}
+
+fn segments_overlap(a: &Segment, b: &Segment) -> bool {
+    use Segment::*;
+    match (a, b) {
+        (Literal(x), Literal(y)) => x == y,
+        (Capture(_), _) | (_, Capture(_)) => true,
+        (PartialCapture { prefix, suffix, .. }, Literal(l))
+        | (Literal(l), PartialCapture { prefix, suffix, .. }) => {
+            l.len() > prefix.len() + suffix.len() && l.starts_with(prefix) && l.ends_with(suffix)
+        }
+        (
+            PartialCapture {
+                prefix: p1,
+                suffix: s1,
+                ..
+            },
+            PartialCapture {
+                prefix: p2,
+                suffix: s2,
+                ..
+            },
+        ) => {
+            (p1.starts_with(p2.as_str()) || p2.starts_with(p1.as_str()))
+                && (s1.ends_with(s2.as_str()) || s2.ends_with(s1.as_str()))
+        }
+    }
+}
+
 /// Whether a device id fits `template`, where a `{…}` left in it stands for
 /// one or more characters: `shelly_sh1_relay{relay}` fits `shelly_sh1_relay0`
 /// and not `shelly_sh1_2_relay0`.
@@ -192,6 +224,22 @@ mod tests {
         assert!(match_segments(&segs, "homecore/devices/tasmota__relay1/cmd").is_none());
         let vars = match_segments(&segs, "homecore/devices/tasmota_x_relay1/cmd").unwrap();
         assert_eq!(vars["device"], "x");
+    }
+
+    #[test]
+    fn patterns_that_share_a_topic_overlap() {
+        let p = parse_pattern;
+        assert!(patterns_overlap(
+            &p("stat/{device}/POWER"),
+            &p("stat/{x}/{y}")
+        ));
+        assert!(patterns_overlap(&p("a/dev_{d}"), &p("a/{x}_1")));
+        assert!(!patterns_overlap(
+            &p("stat/{device}/POWER"),
+            &p("tele/{device}/POWER")
+        ));
+        assert!(!patterns_overlap(&p("a/{d}"), &p("a/{d}/b")));
+        assert!(!patterns_overlap(&p("a/dev_{d}"), &p("a/x")));
     }
 
     #[test]

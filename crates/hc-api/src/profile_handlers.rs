@@ -103,6 +103,9 @@ pub async fn overview(State(s): State<AppState>, AuthUser(claims): AuthUser) -> 
         "shipped_off": set.shipped_off(),
         "off": set.off_files(),
         "heard": set.heard_since(Utc::now() - Duration::hours(1)),
+        // What is wrong with them as a whole: two claiming one topic, types
+        // the catalog lacks.
+        "warnings": set.warnings(),
     }))
     .into_response()
 }
