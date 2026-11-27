@@ -249,8 +249,16 @@ async fn supervise(
                 );
                 set_status(&plugins, &event_bus, &entry.id, "offline").await;
                 backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
-                if !backoff_sleep(backoff_secs, &mut cmd_rx, &mut shutdown).await {
-                    break;
+                match backoff_sleep(backoff_secs, &mut cmd_rx, &mut shutdown).await {
+                    Backoff::Over => {}
+                    Backoff::Stopped => {
+                        set_status(&plugins, &event_bus, &entry.id, "stopped").await;
+                        if !wait_while_stopped(&mut cmd_rx, &mut shutdown).await {
+                            return;
+                        }
+                        backoff_secs = MIN_BACKOFF;
+                    }
+                    Backoff::Quit => break,
                 }
                 continue;
             }
@@ -395,24 +403,10 @@ async fn supervise(
 
         if stopped_by_command {
             set_status(&plugins, &event_bus, &entry.id, "stopped").await;
-            // Wait for a Start or Restart command before resuming.
-            loop {
-                tokio::select! {
-                    cmd = cmd_rx.recv() => {
-                        match cmd {
-                            Some(PluginCommand::Start | PluginCommand::Restart) => {
-                                backoff_secs = MIN_BACKOFF;
-                                break;
-                            }
-                            Some(PluginCommand::Stop) => {} // already stopped
-                        // Settings changed while stopped: it reads them when it starts.
-                        Some(PluginCommand::Reload) => {}
-                            None => return,
-                        }
-                    }
-                    _ = wait_for_shutdown(&mut shutdown) => return,
-                }
+            if !wait_while_stopped(&mut cmd_rx, &mut shutdown).await {
+                return;
             }
+            backoff_secs = MIN_BACKOFF;
             continue;
         }
 
@@ -430,8 +424,16 @@ async fn supervise(
         }
 
         warn!(plugin_id = %entry.id, backoff_secs, "Plugin will restart after backoff");
-        if !backoff_sleep(backoff_secs, &mut cmd_rx, &mut shutdown).await {
-            break;
+        match backoff_sleep(backoff_secs, &mut cmd_rx, &mut shutdown).await {
+            Backoff::Over => {}
+            Backoff::Stopped => {
+                set_status(&plugins, &event_bus, &entry.id, "stopped").await;
+                if !wait_while_stopped(&mut cmd_rx, &mut shutdown).await {
+                    return;
+                }
+                backoff_secs = MIN_BACKOFF;
+            }
+            Backoff::Quit => break,
         }
     }
 }
@@ -522,21 +524,56 @@ fn ask_to_stop(_child: &tokio::process::Child) -> bool {
 
 /// Sleep for `secs`, but wake early on command or shutdown.
 /// Returns `true` if the supervisor should continue, `false` to exit.
+/// How a wait before relaunching a plugin ended.
+#[derive(Debug, PartialEq)]
+enum Backoff {
+    /// The wait is over, or a Start, Restart or Reload cut it short: launch.
+    Over,
+    /// Stop arrived while waiting: the plugin stays stopped.
+    Stopped,
+    /// Core is shutting down, or the plugin was removed.
+    Quit,
+}
+
 async fn backoff_sleep(
     secs: u64,
     cmd_rx: &mut mpsc::Receiver<PluginCommand>,
     shutdown: &mut watch::Receiver<bool>,
-) -> bool {
+) -> Backoff {
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(secs)) => true,
+        _ = tokio::time::sleep(Duration::from_secs(secs)) => Backoff::Over,
         cmd = cmd_rx.recv() => {
             match cmd {
-                Some(PluginCommand::Start | PluginCommand::Restart | PluginCommand::Reload) => true,
-                Some(PluginCommand::Stop) => true, // will re-check in main loop
-                None => false,
+                Some(PluginCommand::Start | PluginCommand::Restart | PluginCommand::Reload) => Backoff::Over,
+                // A crash-looping plugin stopped by hand (or uninstalled, which
+                // stops it first) used to be relaunched here regardless.
+                Some(PluginCommand::Stop) => Backoff::Stopped,
+                None => Backoff::Quit,
             }
         }
-        _ = wait_for_shutdown(shutdown) => false,
+        _ = wait_for_shutdown(shutdown) => Backoff::Quit,
+    }
+}
+
+/// Waits, stopped, for a Start or Restart. False when core is shutting down
+/// or the plugin was removed, so the supervisor should end.
+async fn wait_while_stopped(
+    cmd_rx: &mut mpsc::Receiver<PluginCommand>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(PluginCommand::Start | PluginCommand::Restart) => return true,
+                    Some(PluginCommand::Stop) => {} // already stopped
+                    // Settings changed while stopped: it reads them when it starts.
+                    Some(PluginCommand::Reload) => {}
+                    None => return false,
+                }
+            }
+            _ = wait_for_shutdown(shutdown) => return false,
+        }
     }
 }
 
@@ -806,5 +843,47 @@ mod reload_tests {
 
         shutdown_tx.send(true).unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_stop_while_waiting_to_relaunch_keeps_the_plugin_stopped() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (_keep, mut shutdown) = watch::channel(false);
+        tx.send(PluginCommand::Stop).await.unwrap();
+        assert_eq!(
+            backoff_sleep(60, &mut rx, &mut shutdown).await,
+            Backoff::Stopped
+        );
+
+        // Stopped, it waits through another Stop and a Reload for a Start.
+        tx.send(PluginCommand::Stop).await.unwrap();
+        tx.send(PluginCommand::Reload).await.unwrap();
+        tx.send(PluginCommand::Start).await.unwrap();
+        assert!(wait_while_stopped(&mut rx, &mut shutdown).await);
+    }
+
+    #[tokio::test]
+    async fn a_start_or_the_end_of_the_wait_relaunches() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (_keep, mut shutdown) = watch::channel(false);
+        tx.send(PluginCommand::Restart).await.unwrap();
+        assert_eq!(
+            backoff_sleep(60, &mut rx, &mut shutdown).await,
+            Backoff::Over
+        );
+        assert_eq!(
+            backoff_sleep(0, &mut rx, &mut shutdown).await,
+            Backoff::Over
+        );
+        drop(tx);
+        assert_eq!(
+            backoff_sleep(60, &mut rx, &mut shutdown).await,
+            Backoff::Quit
+        );
     }
 }

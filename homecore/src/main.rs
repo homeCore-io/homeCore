@@ -661,6 +661,20 @@ async fn main() -> Result<()> {
         plugin_registry.clone(),
         hc_api::plugin_access::local_api_base(&config.server.host, config.server.port),
         hc_api::plugin_access::deliver_over(management_rpc.clone()),
+        {
+            // Plugins in homecore.toml and `[[broker.clients]]` are known from
+            // the start; installs and runtimes once the store is open.
+            let known: Vec<String> = config
+                .plugins
+                .iter()
+                .map(|p| p.id.clone())
+                .chain(config.broker.clients.iter().map(|c| c.id.clone()))
+                .collect();
+            let live = live_logins.clone();
+            Arc::new(move |id: &str| {
+                known.iter().any(|k| k == id) || live.get().is_some_and(|l| l.is_installed(id))
+            })
+        },
     );
 
     // Persist plugin learned-state writes (homecore/plugins/<id>/state/set) to

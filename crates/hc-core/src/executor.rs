@@ -10,7 +10,7 @@
 //! # Cancellable Delays
 //!
 //! When `Delay { cancelable: true, cancel_key }` fires, an `Arc<Notify>` is
-//! registered in `ctx.delay_registry` under `"{rule_id}/{key}"`.  A subsequent
+//! registered in `ctx.delay_registry` under `"{rule_id}/{key}#{uuid}"` (one entry per waiting delay).  A subsequent
 //! `CancelDelays` or `CancelRuleTimers` action notifies the handle so the
 //! `tokio::select!` inside the delay wakes early.  The entry is removed
 //! regardless of how the delay exits.
@@ -310,7 +310,7 @@ pub struct ExecutorContext {
     /// and by `RunRuleActions` to build a current snapshot for the called rule.
     pub device_cache: Arc<DashMap<String, HashMap<String, JsonValue>>>,
     /// Registry of active cancellable delays.
-    /// Key format: `"{rule_id}/{cancel_key}"`.
+    /// Key format: `"{rule_id}/{cancel_key}#{uuid}"`, or `"{rule_id}/auto_{uuid}"`.
     pub delay_registry: Arc<DashMap<String, Arc<tokio::sync::Notify>>>,
     /// Pause state per rule (`true` = paused).
     pub pause_state: Arc<DashMap<Uuid, bool>>,
@@ -814,9 +814,14 @@ fn run_single_action(
             } => {
                 debug!(duration_secs, cancelable, "action: Delay");
                 if cancelable {
-                    let key = cancel_key
-                        .map(|k| format!("{}/{k}", ctx.rule_id))
-                        .unwrap_or_else(|| format!("{}/auto_{}", ctx.rule_id, Uuid::new_v4()));
+                    // Each delay has its own entry, even two runs of a rule
+                    // waiting under one cancel_key: under a shared entry the
+                    // second replaced the first, so a cancel stopped only the
+                    // second, and the first's removal took the second's away.
+                    let key = match cancel_key {
+                        Some(k) => format!("{}/{k}#{}", ctx.rule_id, Uuid::new_v4()),
+                        None => format!("{}/auto_{}", ctx.rule_id, Uuid::new_v4()),
+                    };
                     let notify_handle = Arc::new(tokio::sync::Notify::new());
                     ctx.delay_registry
                         .insert(key.clone(), Arc::clone(&notify_handle));
@@ -842,11 +847,7 @@ fn run_single_action(
             } => {
                 let limit = max_iterations.unwrap_or(100);
                 let delay = interval_ms.unwrap_or(0);
-                let snippet = if condition.len() > 60 {
-                    &condition[..60]
-                } else {
-                    &condition
-                };
+                let snippet = crate::text::head(&condition, 60);
                 debug!(condition = %snippet, limit, delay_ms = delay, "action: RepeatUntil — starting");
                 // The body runs first, then the check, against device states
                 // as they are now: the loop is usually waiting for its own
@@ -898,11 +899,7 @@ fn run_single_action(
             } => {
                 let limit = max_iterations.unwrap_or(100);
                 let delay = interval_ms.unwrap_or(0);
-                let snippet = if condition.len() > 60 {
-                    &condition[..60]
-                } else {
-                    &condition
-                };
+                let snippet = crate::text::head(&condition, 60);
                 debug!(condition = %snippet, limit, "action: RepeatWhile — starting");
                 let mut i = 0u32;
                 loop {
@@ -1096,11 +1093,7 @@ fn run_single_action(
 
             // ── RunScript ─────────────────────────────────────────────────────────
             Action::RunScript { script } => {
-                let snippet = if script.len() > 80 {
-                    &script[..80]
-                } else {
-                    &script
-                };
+                let snippet = crate::text::head(&script, 80);
                 debug!(script = %snippet, "action: RunScript — starting");
                 let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
                 let buf_clone = Arc::clone(&buf);
@@ -1338,10 +1331,18 @@ fn run_single_action(
             // ── CancelDelays ───────────────────────────────────────────────────────
             Action::CancelDelays { key } => match key {
                 Some(k) => {
-                    let full_key = format!("{}/{k}", ctx.rule_id);
-                    debug!(rule = %ctx.rule_name, key = %full_key, "action: CancelDelays — specific key");
-                    if let Some((_, n)) = ctx.delay_registry.remove(&full_key) {
-                        n.notify_one();
+                    let prefix = format!("{}/{k}#", ctx.rule_id);
+                    debug!(rule = %ctx.rule_name, key = %k, "action: CancelDelays — specific key");
+                    let keys: Vec<String> = ctx
+                        .delay_registry
+                        .iter()
+                        .filter(|e| e.key().starts_with(&prefix))
+                        .map(|e| e.key().clone())
+                        .collect();
+                    for k in keys {
+                        if let Some((_, n)) = ctx.delay_registry.remove(&k) {
+                            n.notify_one();
+                        }
                     }
                 }
                 None => {
@@ -1464,13 +1465,15 @@ fn run_single_action(
                             }
                             Event::DeviceStateChanged {
                                 device_id: eid,
-                                current,
+                                changed,
                                 ..
                             } => {
                                 (device_id.as_deref() == Some(eid.as_str()))
                                     && attribute
                                         .as_ref()
-                                        .is_none_or(|a| current.contains_key(a.as_str()))
+                                        // `current` is the whole state, which nearly always has the
+                                        // attribute: waiting for `contact` resumed on a battery report.
+                                        .is_none_or(|a| changed.iter().any(|c| c == a))
                             }
                             _ => false,
                         };
@@ -1480,6 +1483,7 @@ fn run_single_action(
                         }
                     }
                 };
+                let wait_fut = until_exit(&ctx.exit_flag, wait_fut);
                 match timeout_ms {
                     Some(ms) => {
                         let _ = tokio::time::timeout(Duration::from_millis(ms), wait_fut).await;
@@ -2073,6 +2077,11 @@ fn run_single_action(
 
                 for step in 1..=n_steps {
                     tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                    // Restarted or exited: a second run's fade would fight
+                    // this one over the light.
+                    if ctx.exit_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
 
                     let t = step as f64 / n_steps as f64;
                     let mut state_obj = serde_json::Map::new();
@@ -2146,6 +2155,7 @@ fn run_single_action(
                         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                     }
                 };
+                let wait_fut = until_exit(&ctx.exit_flag, wait_fut);
                 match timeout_ms {
                     Some(ms) => {
                         let _ = tokio::time::timeout(Duration::from_millis(ms), wait_fut).await;
@@ -2246,6 +2256,21 @@ async fn execute_script_effect(
 // ---------------------------------------------------------------------------
 
 /// Human-readable summary of an action's target / content for trace output.
+/// `wait`, or until the run is told to stop (Restart mode, ExitRule). A
+/// wait with no timeout otherwise kept a restarted run alive for good, and
+/// resumed it later to act on a world that had moved on.
+async fn until_exit(exit: &AtomicBool, wait: impl std::future::Future<Output = ()>) {
+    let stopped = async {
+        while !exit.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::select! {
+        _ = wait => {}
+        _ = stopped => {}
+    }
+}
+
 async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> String {
     match action {
         Action::SetDeviceState {
@@ -2264,21 +2289,13 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
         Action::CallService { url, method, .. } => format!("{} {}", method, url),
         Action::FireEvent { event_type, .. } => format!("event: {}", event_type),
         Action::RunScript { script } => {
-            let s = if script.len() > 60 {
-                &script[..60]
-            } else {
-                script
-            };
+            let s = crate::text::head(script, 60);
             s.to_string()
         }
         Action::Notify {
             channel, message, ..
         } => {
-            let m = if message.len() > 60 {
-                &message[..60]
-            } else {
-                message
-            };
+            let m = crate::text::head(message, 60);
             format!("[{}] {}", channel, m)
         }
         Action::Delay {
@@ -2352,11 +2369,7 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
             timeout_ms,
             ..
         } => {
-            let e = if expression.len() > 60 {
-                &expression[..60]
-            } else {
-                expression
-            };
+            let e = crate::text::head(expression, 60);
             match timeout_ms {
                 Some(t) => format!("{} (timeout: {}ms)", e, t),
                 None => e.into(),
@@ -3179,6 +3192,73 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    /// Two runs of a rule waiting under one cancel_key: a cancel stops both,
+    /// and neither run's end takes the other's entry away.
+    #[tokio::test]
+    async fn delays_sharing_a_cancel_key_are_all_cancelled() {
+        let ctx = ExecutorContext::for_test();
+        let delay = || {
+            ra(Action::Delay {
+                duration_secs: 3600,
+                cancelable: true,
+                cancel_key: Some("off".into()),
+            })
+        };
+        let a = tokio::spawn(execute_actions(
+            vec![delay()],
+            Arc::clone(&ctx),
+            empty_snapshot(),
+        ));
+        let b = tokio::spawn(execute_actions(
+            vec![delay()],
+            Arc::clone(&ctx),
+            empty_snapshot(),
+        ));
+        while ctx.delay_registry.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        execute_actions(
+            vec![ra(Action::CancelDelays {
+                key: Some("off".into()),
+            })],
+            Arc::clone(&ctx),
+            empty_snapshot(),
+        )
+        .await
+        .unwrap();
+        let both = tokio::time::timeout(Duration::from_secs(5), async {
+            a.await.unwrap().unwrap();
+            b.await.unwrap().unwrap();
+        });
+        both.await.expect("both delays were cancelled");
+        assert!(ctx.delay_registry.is_empty());
+    }
+
+    /// A run told to stop (Restart mode, ExitRule) leaves a wait that has no
+    /// timeout, rather than staying alive for good.
+    #[tokio::test]
+    async fn a_wait_ends_when_the_run_is_stopped() {
+        let ctx = ExecutorContext::for_test();
+        let flag = Arc::clone(&ctx.exit_flag);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let wait = ra(Action::WaitForExpression {
+            expression: "false".into(),
+            poll_interval_ms: Some(50),
+            hold_duration_ms: None,
+            timeout_ms: None,
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_actions(vec![wait], ctx, empty_snapshot()),
+        )
+        .await
+        .expect("the wait ended")
+        .unwrap();
     }
 }
 

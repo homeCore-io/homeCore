@@ -14,7 +14,21 @@ use anyhow::{anyhow, Context, Result};
 /// entry is found, or the write fails. The matching entry's other
 /// fields and surrounding TOML structure (other entries, comments,
 /// section ordering) are left untouched.
+/// Held from reading homecore.toml to writing it back. Each edit (a save in
+/// Configuration, the temperature unit, a plugin turned on or off, the broker
+/// opened) read the file, changed it and wrote it whole, so two at once kept
+/// only the last one's change.
+///
+/// A std guard, not tokio's: it can't be held across an `.await` in a
+/// handler, which is the point, since nothing between the read and the write
+/// should wait on anything.
+pub fn core_config_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn persist_plugin_enabled(config_path: &Path, plugin_id: &str, enabled: bool) -> Result<()> {
+    let _edit = core_config_lock();
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("read {}", config_path.display()))?;
 

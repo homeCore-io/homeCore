@@ -424,12 +424,16 @@ pub async fn deliver_grant(
 /// Watch for capability manifests and give each plugin that asks its REST
 /// access. Call before plugins spawn, like the registry listener, or the
 /// manifests published at startup are missed.
+/// Whether a plugin id is one an admin set up, and so may be given a key.
+pub type Installed = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub fn spawn_plugin_api_access(
     event_bus: EventBus,
     store: StateStore,
     plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
     local_base: String,
     deliver: Deliver,
+    installed: Installed,
 ) {
     let mut rx = event_bus.subscribe();
     tokio::spawn(async move {
@@ -445,6 +449,18 @@ pub fn spawn_plugin_api_access(
                     // be deleted; stop it so the plugin never gets it late.
                     if let Some(prev) = sending.remove(&plugin_id) {
                         prev.abort();
+                    }
+                    // Anything on the broker can publish a manifest under any
+                    // id, and the embedded broker checks no topics: a device
+                    // login asking for scopes under a made-up plugin id was
+                    // given a key with nearly every scope. Only a plugin an
+                    // admin set up gets one.
+                    if !installed(&plugin_id) {
+                        warn!(
+                            plugin_id,
+                            "a manifest asked for REST access for a plugin homeCore doesn't have; none given"
+                        );
+                        continue;
                     }
                     let managed = plugins
                         .read()
@@ -863,6 +879,50 @@ mod tests {
             .is_empty());
     }
 
+    /// A manifest under an id homeCore has no plugin for gets no key: anything
+    /// on the broker can publish one.
+    #[tokio::test]
+    async fn a_manifest_for_a_plugin_homecore_lacks_gets_nothing() {
+        let (_d, store) = store().await;
+        let bus = EventBus::new(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let deliver: Deliver = Arc::new(move |id, params| {
+            let _ = tx.send((id, params));
+            Box::pin(async { Ok(json!({ "status": "ok" })) })
+        });
+        spawn_plugin_api_access(
+            bus.clone(),
+            store.clone(),
+            Arc::default(),
+            LOCAL.into(),
+            deliver,
+            Arc::new(|_| false),
+        );
+        tokio::task::yield_now().await;
+        let _ = bus.publish(hc_types::event::Event::PluginCapabilities {
+            timestamp: Utc::now(),
+            plugin_id: "plugin.made-up".into(),
+            capabilities: hc_types::Capabilities {
+                spec: "1".into(),
+                plugin_id: "plugin.made-up".into(),
+                actions: Vec::new(),
+                api_scopes: vec!["devices:write".into()],
+            },
+            config_schema: None,
+            config_descriptor: None,
+            alert_kinds: Vec::new(),
+            ui: None,
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(300), rx.recv())
+            .await
+            .is_err());
+        assert!(store
+            .list_api_keys_by_plugin("plugin.made-up")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn the_listener_mints_and_sends_on_a_manifest() {
         let (_d, store) = store().await;
@@ -878,6 +938,7 @@ mod tests {
             Arc::default(),
             LOCAL.into(),
             deliver,
+            Arc::new(|id| id == "plugin.mcp"),
         );
         tokio::task::yield_now().await;
         let _ = bus.publish(hc_types::event::Event::PluginCapabilities {

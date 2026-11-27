@@ -5679,10 +5679,12 @@ pub async fn get_plugin_stream_sse(
         };
         let whitelisted =
             !s.whitelist.is_empty() && s.whitelist.iter().any(|net| net.contains(&remote_ip));
-        if whitelisted {
+        // A token, when one is sent, is judged as itself (as in REST and on
+        // /events/stream), not replaced by the whitelist's admin.
+        let token = bearer.as_deref().or(query.token.as_deref()).unwrap_or("");
+        if token.is_empty() && whitelisted {
             crate::auth_middleware::whitelist_claims()
         } else {
-            let token = bearer.as_deref().or(query.token.as_deref()).unwrap_or("");
             // The same dispatch as everywhere else: an API key against the
             // api_keys store, anything else as a JWT. This route accepted a
             // key in its header fallback and not in its query parameter, which
@@ -5699,13 +5701,19 @@ pub async fn get_plugin_stream_sse(
     // plugins:read, as it always has.
     let private = match s.streaming_registry.owner(&request_id).await {
         Some(o) if o.plugin_id == plugin_id && o.open => Some(o.starter),
+        // Another plugin's request: there is no such stream here.
+        Some(o) if o.plugin_id != plugin_id => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such stream for this plugin" })),
+            )
+                .into_response();
+        }
         _ => None,
     };
     match private {
         Some(starter) => {
-            if starter != crate::plugin_access::starter_key(&claims)
-                && !claims.has_scope("plugins:write")
-            {
+            if starter != crate::plugin_access::starter_key(&claims) && !claims.is_admin() {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(json!({ "error": "only whoever started this may read it" })),
@@ -5728,7 +5736,7 @@ pub async fn get_plugin_stream_sse(
     // Subscribe BEFORE reading the cache so any event that lands between
     // the snapshot and the first recv() is still captured on the live bus.
     let mut bus_rx = s.raw_bus.subscribe();
-    let cache_snapshot = s.stream_cache.snapshot(&request_id).await;
+    let cache_snapshot = s.stream_cache.snapshot(&plugin_id, &request_id).await;
 
     tokio::spawn(async move {
         // Step 1: replay cached events. The plan's "retained last event
@@ -6064,13 +6072,13 @@ pub async fn patch_plugin(
 /// fetch a document, edit an unrelated field, and save it back without wiping
 /// out credentials it was never shown.  The admin UI does exactly that: it loads
 /// `raw` into a text area and PUTs the text straight back.
-const REDACTED_SECRET: &str = "__redacted__";
+pub(crate) const REDACTED_SECRET: &str = "__redacted__";
 
 /// Whether a TOML/JSON key holds a credential, as opposed to merely pointing at
 /// one.  `password` and `app_key` are secrets; `key_path`, `token_url`, and
 /// `refresh_token_expiry_days` are not, and redacting those would corrupt the
 /// config to no benefit — so the exclusions are checked first.
-fn is_secret_key(key: &str) -> bool {
+pub(crate) fn is_secret_key(key: &str) -> bool {
     let k = key.trim().to_ascii_lowercase();
     if k.ends_with("path") || k.ends_with("_url") || k.ends_with("_type") || k.contains("expiry") {
         return false;
@@ -6131,8 +6139,14 @@ fn toml_assignment(line: &str) -> Option<(&str, &str, &str)> {
 
 /// Redact secrets in raw TOML text, preserving comments and layout — the admin
 /// UI shows this verbatim in an editor, so re-serializing the parsed document
-/// (and losing every comment) would not do.
+/// (and losing every comment) would not do. On the parsed document
+/// ([`crate::config_secrets`]), so inline tables, multi-line strings and
+/// arrays are covered; line by line only for text that isn't TOML.
 fn redact_toml_text(src: &str) -> String {
+    crate::config_secrets::redact(src).unwrap_or_else(|| redact_toml_lines(src))
+}
+
+fn redact_toml_lines(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
         match toml_assignment(line) {
@@ -6152,6 +6166,11 @@ fn redact_toml_text(src: &str) -> String {
 /// Without this, saving a config fetched from the API would overwrite every
 /// credential in it with `__redacted__`.
 fn restore_toml_secrets(incoming: &str, current: &str) -> String {
+    crate::config_secrets::restore(incoming, current)
+        .unwrap_or_else(|| restore_toml_lines(incoming, current))
+}
+
+fn restore_toml_lines(incoming: &str, current: &str) -> String {
     let cur_sections = toml_line_sections(current);
     let mut stored: HashMap<(String, String), String> = HashMap::new();
     for (i, line) in current.lines().enumerate() {
@@ -6204,17 +6223,21 @@ fn parse_config_json(content: &str) -> Result<Value, String> {
 }
 
 fn redact_json_secrets(value: &mut Value) {
+    redact_json_under(false, value);
+}
+
+/// An object is walked key by key whatever its own key is called; anything
+/// else under a secret key is masked, an array's elements included
+/// (`api_tokens = ["a", "b"]` went out in clear).
+fn redact_json_under(secret: bool, value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
-                if is_secret_key(k) && !v.is_object() && !v.is_array() {
-                    *v = Value::String(REDACTED_SECRET.to_string());
-                } else {
-                    redact_json_secrets(v);
-                }
+                redact_json_under(is_secret_key(k), v);
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(redact_json_secrets),
+        Value::Array(items) => items.iter_mut().for_each(|v| redact_json_under(secret, v)),
+        _ if secret => *value = Value::String(REDACTED_SECRET.to_string()),
         _ => {}
     }
 }
@@ -6245,7 +6268,12 @@ fn restore_json_secrets(incoming: &mut Value, current: &Value) {
             for (i, v) in inc.iter_mut().enumerate() {
                 let matched = array_identity_match(v, cur).or_else(|| cur.get(i));
                 if let Some(c) = matched {
-                    restore_json_secrets(v, c);
+                    if v.as_str() == Some(REDACTED_SECRET) {
+                        // A masked element of a secret array: its own value.
+                        *v = c.clone();
+                    } else {
+                        restore_json_secrets(v, c);
+                    }
                 }
             }
         }
@@ -6445,8 +6473,17 @@ pub async fn put_plugin_config(
         // everything else stay — or { "config": {...} } (JSON→TOML, whole
         // file) or { "raw": "..." } (raw TOML string).
         let toml_str = if let Some(patch) = body.get("patch") {
-            // A secret echoed back masked is a secret not being changed.
+            // A secret echoed back masked is a secret not being changed. Put
+            // back what it stands for first, so a masked element of an array
+            // (which a patch writes whole) keeps its value; whatever is left
+            // with nothing to stand for is left out.
             let mut patch = patch.clone();
+            if has_redaction(&patch) {
+                if let Ok(parsed) = toml::from_str::<toml::Value>(&current) {
+                    let current_json = serde_json::to_value(parsed).unwrap_or_default();
+                    restore_json_secrets(&mut patch, &current_json);
+                }
+            }
             drop_redacted(&mut patch);
             match crate::config_writer::apply_section_patch(&current, &patch) {
                 Ok(s) => s,
@@ -6525,6 +6562,16 @@ pub async fn put_plugin_config(
             )
                 .into_response();
         };
+
+        // A typo in the raw editor used to be written with a 200, and a placed
+        // plugin's runtime restarted it on the broken file.
+        if let Err(e) = toml::from_str::<toml::Value>(&toml_str) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("not valid TOML: {e}") })),
+            )
+                .into_response();
+        }
 
         // Atomic: a runtime may be reading this file for its check-in.
         return match crate::config_writer::write_atomic(
@@ -8578,6 +8625,7 @@ pub async fn put_system_config(
             .into_response();
     }
 
+    let edit = crate::config_writer::core_config_lock();
     let new_raw: String = if let Some(patch) = body.get("patch") {
         let current = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -8648,14 +8696,14 @@ pub async fn put_system_config(
             .into_response();
     };
 
-    // Validate the result parses as TOML. Full AppConfig deserialize
-    // happens at next core start; we only catch the shallow class of
-    // errors here (typos, missing quotes) so the operator gets
-    // immediate feedback without rejecting valid-but-unusual configs.
-    if let Err(e) = toml::from_str::<toml::Value>(&new_raw) {
+    // The result must load as homeCore's config, not merely parse as TOML:
+    // a file that doesn't load starts homeCore on defaults for everything
+    // (`"port": "8080"` as a string, a latitude set to nothing). Keys
+    // homeCore doesn't know are still accepted.
+    if let Err(e) = toml::from_str::<hc_config::AppConfig>(&new_raw) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": format!("TOML parse error: {e}") })),
+            Json(json!({ "error": format!("homeCore couldn't load this config: {e}") })),
         )
             .into_response();
     }
@@ -8668,6 +8716,7 @@ pub async fn put_system_config(
         )
             .into_response();
     }
+    drop(edit);
 
     tracing::info!(path = %path.display(), "homecore.toml updated via PUT /system/config");
 
@@ -8771,6 +8820,7 @@ pub async fn put_temperature_unit(
             .into_response();
     };
 
+    let edit = crate::config_writer::core_config_lock();
     let written = std::fs::read_to_string(path.as_path())
         .map_err(|e| format!("read failed: {e}"))
         .and_then(|current| {
@@ -8784,6 +8834,7 @@ pub async fn put_temperature_unit(
             crate::config_writer::write_atomic(path.as_path(), new_raw.as_bytes())
                 .map_err(|e| format!("write failed: {e}"))
         });
+    drop(edit);
     if let Err(error) = written {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9136,6 +9187,18 @@ token = "TOKEN-TWO"
         assert!(one < two, "the two channels' tokens were swapped");
         assert_eq!(written.matches("TOKEN-ONE").count(), 1);
         assert_eq!(written.matches("TOKEN-TWO").count(), 1);
+    }
+
+    #[test]
+    fn a_secret_array_is_masked_and_put_back() {
+        let shown = parse_config_json("api_tokens = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(
+            shown["api_tokens"],
+            json!([REDACTED_SECRET, REDACTED_SECRET])
+        );
+        let mut back = shown.clone();
+        restore_json_secrets(&mut back, &json!({ "api_tokens": ["a", "b"] }));
+        assert_eq!(back["api_tokens"], json!(["a", "b"]));
     }
 
     #[test]

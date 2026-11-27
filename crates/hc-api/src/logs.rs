@@ -81,10 +81,14 @@ pub async fn log_stream_handler(
 
     // `user` for the active-connection registry. Whitelisted callers
     // are recorded as "whitelist"; JWT callers as the validated subject.
-    let user = if is_whitelisted {
-        "whitelist".to_string()
+    //
+    // A token, when one is sent, is judged as itself, as on /events/stream
+    // and in REST: a person's browser behind a whitelisted proxy that sends
+    // its own token was let in as an admin here.
+    let token = params.token.as_deref().unwrap_or("");
+    let claims = if token.is_empty() && is_whitelisted {
+        crate::auth_middleware::whitelist_claims()
     } else {
-        let token = params.token.as_deref().unwrap_or("");
         // The same dispatch every other credential path uses: an API key
         // against the api_keys store, anything else as a JWT. A key that
         // opened the event stream and not this one would be a credential with
@@ -99,9 +103,14 @@ pub async fn log_stream_handler(
                 )
                     .into_response()
             }
-            Ok(claims) => claims.sub,
+            Ok(claims) => claims,
             Err(resp) => return *resp,
         }
+    };
+    let user = if token.is_empty() && is_whitelisted {
+        "whitelist".to_string()
+    } else {
+        claims.sub.clone()
     };
 
     // Check that the log stream feature is enabled.
@@ -142,6 +151,7 @@ pub async fn log_stream_handler(
             user,
             user_agent,
             metrics,
+            (state, claims),
         )
     })
 }
@@ -160,6 +170,9 @@ async fn handle_socket(
     user: String,
     user_agent: Option<String>,
     metrics: Arc<MetricsCollector>,
+    // Checked every half minute, as on /events/stream: a session signed out
+    // or a key revoked went on receiving the logs until the socket dropped.
+    (app, claims): (AppState, hc_auth::Claims),
 ) {
     // Register in the active-connection map; guard auto-removes on
     // every return path. OPS-1 piece 3.
@@ -206,8 +219,16 @@ async fn handle_socket(
 
         // Live tail.
         let mut rx = state.tx.subscribe();
+        let mut recheck = tokio::time::interval(std::time::Duration::from_secs(30));
+        recheck.tick().await;
         loop {
             tokio::select! {
+                _ = recheck.tick() => {
+                    if let Err(reason) = crate::ws::credential_holds(&app, &claims).await {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break 'sock reason;
+                    }
+                }
                 result = rx.recv() => {
                     match result {
                         Ok(line) => {

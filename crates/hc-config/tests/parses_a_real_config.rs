@@ -143,3 +143,15 @@ fn list_every_config_key() {
         println!("{k}");
     }
 }
+
+/// Setting the temperature unit on a config with no `[location]` writes one
+/// holding only that. It must load, with the rest of the section at its
+/// defaults, or homeCore starts on defaults for everything.
+#[test]
+fn a_location_with_only_a_temperature_unit_loads() {
+    let c: AppConfig = toml::from_str("[location]\ntemperature_unit = \"°F\"\n").expect("loads");
+    let d = AppConfig::default();
+    assert_eq!(c.location.temperature_unit.as_deref(), Some("°F"));
+    assert_eq!(c.location.latitude, d.location.latitude);
+    assert_eq!(c.location.longitude, d.location.longitude);
+}

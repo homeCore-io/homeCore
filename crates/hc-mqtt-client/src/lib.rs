@@ -151,8 +151,17 @@ impl MqttClient {
                     info!("MQTT connected; subscribing");
                     for filter in subscription_filters(&self.extra_subscriptions) {
                         info!(%filter, "Subscribing to topic filter");
+                        // QoS 0, not 1. rumqttd gives a new subscription its
+                        // retained messages in one batch and drops what doesn't
+                        // fit; at QoS 1 the batch is its in-flight window, a
+                        // constant 100, so a restart lost every retained state,
+                        // availability and plugin manifest past the hundredth.
+                        // At QoS 0 it is `max_outgoing_packet_count`, which
+                        // hc-broker sets. On loopback the ack adds nothing, and
+                        // rumqttd still reads QoS 0 from its log at the
+                        // client's pace, so a busy moment drops nothing.
                         self.client
-                            .subscribe(&filter, QoS::AtLeastOnce)
+                            .subscribe(&filter, QoS::AtMostOnce)
                             .await
                             .with_context(|| format!("subscribe to {filter} failed"))?;
                     }

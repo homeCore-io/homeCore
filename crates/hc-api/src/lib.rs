@@ -35,6 +35,7 @@ pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
 pub mod change_audit;
+mod config_secrets;
 pub mod config_writer;
 pub mod display_handlers;
 pub mod event_access;

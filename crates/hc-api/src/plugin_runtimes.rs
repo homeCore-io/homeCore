@@ -211,6 +211,16 @@ impl BrokerLogins {
         }
     }
 
+    /// A plugin an admin set up: listed in homecore.toml, a runtime, or given
+    /// a config file (an install, or a placement on a runtime). Unlike
+    /// [`Self::is_reserved_client_id`], a name merely shaped like a plugin's
+    /// (`plugin.anything`) is not one.
+    pub fn is_installed(&self, id: &str) -> bool {
+        self.listed.iter().any(|(l, _)| l == id)
+            || matches!(self.runtimes.by_plugin_id(id), Ok(Some(_)))
+            || self.config_for(id).is_some_and(|p| p.exists())
+    }
+
     /// A client id homeCore or one of its plugins connects as.
     pub fn is_reserved_client_id(&self, id: &str) -> bool {
         ["plugin.", "internal.", "core."]

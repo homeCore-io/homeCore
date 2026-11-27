@@ -22,6 +22,25 @@ pub fn is_temperature_name(name: &str) -> bool {
     if name.ends_with("_unit") {
         return false;
     }
+    // Not a temperature the °F/K conversion applies to: a colour temperature
+    // ("color_temperature" in K came out as 2426.85), or a difference between
+    // two (a 2 °F offset is not -16.7 °C).
+    let n = name.to_ascii_lowercase();
+    if n.contains("color_temp")
+        || n.contains("colour_temp")
+        || [
+            "offset",
+            "delta",
+            "hysteresis",
+            "deadband",
+            "differential",
+            "swing",
+        ]
+        .iter()
+        .any(|w| n.contains(w))
+    {
+        return false;
+    }
     matches!(
         name,
         "temperature" | "setpoint" | "heat_setpoint" | "cool_setpoint"
@@ -180,6 +199,16 @@ pub fn not_celsius(schema: &DeviceSchema) -> Vec<(&str, Option<&str>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_temperatures_and_differences_are_not_converted() {
+        assert!(is_temperature_name("temperature"));
+        assert!(is_temperature_name("outdoor_temperature"));
+        assert!(is_temperature_name("heat_setpoint"));
+        assert!(!is_temperature_name("color_temperature"));
+        assert!(!is_temperature_name("temp_offset"));
+        assert!(!is_temperature_name("setpoint_deadband"));
+    }
 
     #[test]
     fn temperature_names() {

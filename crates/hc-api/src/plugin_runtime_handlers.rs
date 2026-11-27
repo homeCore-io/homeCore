@@ -368,6 +368,14 @@ pub async fn remove_runtime(
         .await;
         removed_plugins.push(p.plugin_id.clone());
     }
+    // Whatever an uninstall above failed to take off (or an install that ran
+    // meanwhile put on) would stay placed on a runtime that no longer exists:
+    // listed as on, with no way to turn it off.
+    for p in store.placements_for(&id).unwrap_or_default() {
+        if let Err(e) = store.unplace(&id, &p.plugin_id) {
+            tracing::warn!(runtime_id = %id, plugin_id = %p.plugin_id, error = %e, "could not take a plugin off a removed runtime");
+        }
+    }
     // The runtime registered as a plugin too; forget it the same way, so it does
     // not linger in the plugin list as offline.
     let _ = crate::handlers::deregister_plugin(
@@ -440,6 +448,7 @@ pub async fn open_broker(
             "homeCore was started without --config, so it can't change its own settings",
         );
     };
+    let edit = crate::config_writer::core_config_lock();
     let text = match std::fs::read_to_string(path.as_path()) {
         Ok(t) => t,
         Err(e) => {
@@ -453,12 +462,15 @@ pub async fn open_broker(
         Ok(t) => t,
         Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
     };
-    if let Err(e) = std::fs::write(path.as_path(), &updated) {
+    // Atomic, like every other write of this file: a crash halfway left
+    // homeCore with a config it couldn't load.
+    if let Err(e) = crate::config_writer::write_atomic(path.as_path(), updated.as_bytes()) {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("writing homecore.toml: {e}"),
         );
     }
+    drop(edit);
     let e = crate::audit::entry_from_claims(&claims, "broker.opened_to_network");
     crate::audit::emit(&state, e).await;
     tracing::info!("broker set to listen on the network; takes effect at restart");
@@ -580,6 +592,11 @@ pub fn place_on_runtime(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("plugin install is not configured on this server"))?;
 
+    // An install racing the runtime's removal must not place onto it.
+    if store(state).get(runtime_id)?.is_none() {
+        anyhow::bail!("no runtime {runtime_id}");
+    }
+
     let config_store =
         crate::plugin_config_store::PluginConfigStore::new(ctx.config_plugins_dir.clone());
     if !config_store.exists(plugin_id) {
@@ -591,6 +608,16 @@ pub fn place_on_runtime(
             svc::mint_mqtt_password(),
         );
         config_store.write(plugin_id, &bootstrap)?;
+    }
+
+    // A plugin lives on one runtime. Installed onto another, it used to stay
+    // on the first too: both ran it under one broker login and client id,
+    // each pushing the other off the broker, and uninstalling removed one.
+    for other in store(state).all_placements()? {
+        if other.plugin_id == plugin_id && other.runtime_id != runtime_id {
+            store(state).unplace(&other.runtime_id, plugin_id)?;
+            nudge_runtime(state, &other.runtime_id);
+        }
     }
 
     store(state).place(&hc_state::plugin_runtime_store::PlacementRecord {

@@ -61,10 +61,14 @@ impl StreamCache {
         Self::default()
     }
 
-    pub async fn snapshot(&self, request_id: &str) -> Vec<Value> {
+    /// What one plugin's stream has carried so far. Keyed by plugin and
+    /// request together: by request id alone, any reader could replay a
+    /// stream through another plugin's URL, and a plugin could add events
+    /// to another plugin's stream by publishing under its request id.
+    pub async fn snapshot(&self, plugin_id: &str, request_id: &str) -> Vec<Value> {
         let guard = self.inner.lock().await;
         guard
-            .get(request_id)
+            .get(&cache_key(plugin_id, request_id))
             .map(|c| c.events.clone())
             .unwrap_or_default()
     }
@@ -156,7 +160,7 @@ pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
                 msg = rx.recv() => {
                     match msg {
                         Ok(Event::MqttMessage { topic, payload, .. }) => {
-                            let Some((_pid, request_id)) = parse_stream_topic(&topic) else {
+                            let Some((pid, request_id)) = parse_stream_topic(&topic) else {
                                 continue;
                             };
                             // Empty retained-clear — not a real event; skip.
@@ -171,7 +175,7 @@ pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
                                 .and_then(Value::as_str)
                                 .map(is_terminal)
                                 .unwrap_or(false);
-                            cache.append(request_id, val, is_term).await;
+                            cache.append(cache_key(&pid, &request_id), val, is_term).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -406,6 +410,10 @@ pub async fn inject_plugin_offline(
         }
         let _ = publish.publish(&topic, Vec::new()).await;
     }
+}
+
+fn cache_key(plugin_id: &str, request_id: &str) -> String {
+    format!("{plugin_id}/{request_id}")
 }
 
 /// Return `Some((plugin_id, request_id))` if `topic` matches

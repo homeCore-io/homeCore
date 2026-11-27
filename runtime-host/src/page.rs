@@ -176,19 +176,39 @@ async fn put_key(
     };
 
     // A runtime still in use stays with its homeCore. Its own new key (Reset
-    // login) is fine; another homeCore's key is taken only once the old one has
-    // stopped working, which is what removing the runtime there does.
+    // login: same runtime, same homeCore and broker, new secret) is fine; any
+    // other key is taken only once the old homeCore refuses the old one, which
+    // is what removing the runtime there does.
+    //
+    // Both halves matter. The runtime id is on this page for anyone to read,
+    // so a key with that id and someone else's address was taken without the
+    // check. And "the old homeCore didn't answer" is not "it removed this
+    // runtime": during a restart of homeCore, any key was taken.
     let current = shared.current.lock().ok().and_then(|c| c.clone());
-    if let Some(cur) = current.filter(|c| c.runtime_id != key.runtime_id) {
+    if let Some(cur) = current.filter(|c| !same_home(c, &key)) {
         let old = CoreClient::new(shared.http.clone(), &cur.url, &cur.runtime_id, &cur.secret);
-        if old.hello(&shared.hello).await.is_ok() {
-            return refuse(
-                StatusCode::CONFLICT,
-                format!(
-                    "this runtime is still added in homeCore at {}. Remove it there first, then paste the new key",
-                    cur.url
-                ),
-            );
+        match old.hello(&shared.hello).await {
+            Err(e) if e.downcast_ref::<crate::core_client::KeyRefused>().is_some() => {}
+            Ok(_) => {
+                return refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this runtime is still added in homeCore at {}. Remove it there first, then paste the new key",
+                        cur.url
+                    ),
+                )
+            }
+            Err(e) => {
+                return refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "homeCore at {} didn't answer ({e:#}), so it can't confirm this runtime was removed there. \
+                         Try again once it's up; if homeCore has moved, set the new key with {} where the container starts",
+                        cur.url,
+                        key_store::ENV
+                    ),
+                )
+            }
         }
     }
 
@@ -205,6 +225,15 @@ async fn put_key(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "name": name })),
     )
+}
+
+/// Whether a key is this runtime's own, from the same homeCore and broker: a
+/// Reset login, which needs no word from the old key.
+fn same_home(current: &ConnectionKey, new: &ConnectionKey) -> bool {
+    current.runtime_id == new.runtime_id
+        && current.url == new.url
+        && current.broker_host == new.broker_host
+        && current.broker_port == new.broker_port
 }
 
 #[derive(Deserialize)]
@@ -413,7 +442,38 @@ refresh(); setInterval(refresh, 3000);
 
 #[cfg(test)]
 mod tests {
-    use super::older;
+    use super::{older, same_home};
+    use hc_api_types::plugin_runtimes::ConnectionKey;
+
+    fn key(runtime_id: &str, url: &str, broker_host: &str) -> ConnectionKey {
+        ConnectionKey {
+            url: url.into(),
+            broker_host: broker_host.into(),
+            broker_port: 1883,
+            runtime_id: runtime_id.into(),
+            username: format!("plugin.python-{runtime_id}"),
+            secret: "s".into(),
+            kind: "python".into(),
+            abi: "cp313".into(),
+        }
+    }
+
+    /// Only a Reset login skips asking the old homeCore. The runtime id is on
+    /// the page, so a key with it and another address is not one.
+    #[test]
+    fn only_the_same_runtime_at_the_same_home_is_a_reset() {
+        let now = key("rt-1", "http://hc:8080", "hc");
+        assert!(same_home(&now, &key("rt-1", "http://hc:8080", "hc")));
+        assert!(!same_home(
+            &now,
+            &key("rt-1", "http://elsewhere:8080", "hc")
+        ));
+        assert!(!same_home(
+            &now,
+            &key("rt-1", "http://hc:8080", "elsewhere")
+        ));
+        assert!(!same_home(&now, &key("rt-2", "http://hc:8080", "hc")));
+    }
 
     #[test]
     fn versions_compare_by_number() {

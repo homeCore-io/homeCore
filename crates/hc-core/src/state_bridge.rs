@@ -1106,6 +1106,17 @@ impl StateBridge {
                         // other from a client's point of view.
                         self.announce_schema(device_id, &schema);
                     }
+                    // Many plugins send a schema of their own for a type the
+                    // catalog doesn't know (a Lutron keypad, a Hue scene), so
+                    // only a device left with none at all is worth a warning.
+                    // Every plugin registers again at each start, which made
+                    // this the log's loudest line for devices that were fine.
+                    None if self.store.get_device_schema(device_id).await?.is_some() => {
+                        debug!(
+                            device_id,
+                            device_type, "No catalog type; the device has its own schema"
+                        );
+                    }
                     None => {
                         warn!(
                             device_id,

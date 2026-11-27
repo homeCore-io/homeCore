@@ -49,10 +49,8 @@ pub fn generate() -> Result<NewRefreshToken> {
 }
 
 pub fn lookup_prefix_from_body(body: &str) -> Option<&str> {
-    if body.len() < LOOKUP_PREFIX_LEN {
-        return None;
-    }
-    Some(&body[..LOOKUP_PREFIX_LEN])
+    // `get`, not a slice: a token with a multibyte character is no token, not a panic.
+    body.get(..LOOKUP_PREFIX_LEN)
 }
 
 pub fn hash_token(full_token: &str) -> Result<String> {

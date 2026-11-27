@@ -395,7 +395,10 @@ pub(crate) fn event_frame(
 /// token: a session signed out, a password changed, a key revoked or a token
 /// expired, and the socket went on carrying the house. `Err` is the reason it
 /// is closed, logged like the others.
-async fn credential_holds(state: &AppState, claims: &Claims) -> Result<(), &'static str> {
+pub(crate) async fn credential_holds(
+    state: &AppState,
+    claims: &Claims,
+) -> Result<(), &'static str> {
     let now = chrono::Utc::now();
     // `u64::MAX` for the synthetic claims (keys, whitelist, UDS); keys carry
     // their own expiry on the record, checked below.
