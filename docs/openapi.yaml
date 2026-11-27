@@ -5442,6 +5442,29 @@ paths:
           description: Its ecosystem
         "404":
           description: No such device, or no ecosystem takes it in
+  /mqtt/files/{file}/shipped:
+    post:
+      operationId: takeShippedMqttProfile
+      summary: Take homeCore's version of a profile
+      description: |
+        Replaces a copy of a shipped profile with the one this homeCore ships,
+        keeping the devices it names in `[ecosystem.devices]` (their types and
+        names), and applies it. A profile's `differs_from_shipped` says when
+        its copy differs, devices aside. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Replaced and applied
+        "400":
+          description: homeCore ships no profile of its name
   /devices/removed:
     get:
       operationId: listRemovedDevices

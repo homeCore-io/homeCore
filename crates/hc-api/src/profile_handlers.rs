@@ -359,6 +359,7 @@ pub async fn get_file(
             "text": text,
             "on": status.is_some(),
             "status": status,
+            "shipped_text": set.shipped_text(&file),
         }))
         .into_response(),
         Err(e) => err(StatusCode::NOT_FOUND, format!("{e:#}")),
@@ -576,6 +577,24 @@ pub async fn device_profile(
     }
 }
 
+/// `POST /mqtt/files/{file}/shipped`: replace a copy of a shipped profile
+/// with the one this homeCore ships, keeping the devices it names.
+pub async fn take_shipped(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(file): Path<String>,
+) -> Response {
+    let set = match admin_profiles(&s, &claims) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    change_then_apply(set, move |p| {
+        p.take_shipped(&file)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +606,7 @@ mod tests {
             description: None,
             prefix: Some(prefix.into()),
             shipped: true,
+            differs_from_shipped: false,
             error: None,
         }
     }

@@ -55,6 +55,10 @@ pub struct ProfileFileStatus {
     /// Whether homeCore ships a profile of this name (this file is a copy of
     /// it, possibly changed) rather than one somebody wrote.
     pub shipped: bool,
+    /// A copy of a shipped profile that differs from the one this homeCore
+    /// ships, setting aside the devices it names: homeCore's has changed since
+    /// it was copied, or it was changed here (or both).
+    pub differs_from_shipped: bool,
     /// Why it didn't load, as TOML says it, with the line.
     pub error: Option<String>,
 }
@@ -229,6 +233,8 @@ impl ProfileSet {
                         description: p.description.clone(),
                         prefix: Some(p.prefix.clone()),
                         shipped: shipped_names.contains(&p.name),
+                        differs_from_shipped: shipped_by_name(&p.name)
+                            .is_some_and(|(_, src)| !same_but_devices(&r.text, src)),
                         error: None,
                     });
                     profiles.push(p);
@@ -241,6 +247,7 @@ impl ProfileSet {
                         description: None,
                         prefix: None,
                         shipped: false,
+                        differs_from_shipped: false,
                         error: Some(e),
                     });
                 }
@@ -756,6 +763,47 @@ impl ProfileSet {
         Ok(())
     }
 
+    /// The profile this homeCore ships of the same name as `file`'s, when there
+    /// is one: to compare a copy with.
+    pub fn shipped_text(&self, file: &str) -> Option<&'static str> {
+        let text = self.source(file).ok()?;
+        let name = load_profile_str(&text).ok()?.name;
+        shipped_by_name(&name).map(|(_, src)| src)
+    }
+
+    /// Replace a copy of a shipped profile with the one this homeCore ships,
+    /// keeping the devices it names (their types and names). Applies at once.
+    pub fn take_shipped(&self, file: &str) -> Result<()> {
+        let dir = self.require_dir()?;
+        check_file_name(file)?;
+        let current = self.source(file)?;
+        let name = load_profile_str(&current)?.name;
+        let (_, src) = shipped_by_name(&name)
+            .ok_or_else(|| anyhow!("homeCore ships no profile named {name}"))?;
+        let kept = devices_of(&current);
+        let next = if kept.is_empty() {
+            src.to_string()
+        } else {
+            with_device_entries(src, &kept)?
+        };
+        load_profile_str(&next)?;
+        let path = dir.join(file);
+        let off = dir.join(format!("{file}.off"));
+        let target = if !path.exists() && off.exists() {
+            off
+        } else {
+            path
+        };
+        write_atomic(&target, next.as_bytes())?;
+        info!(
+            file,
+            kept = kept.len(),
+            "Profile replaced with homeCore's, devices kept"
+        );
+        self.reload();
+        Ok(())
+    }
+
     /// Delete a profile file, on or off. Its devices stay.
     pub fn delete(&self, file: &str) -> Result<()> {
         let dir = self.require_dir()?;
@@ -867,6 +915,48 @@ fn check_file_name(file: &str) -> Result<()> {
         bail!("{file} isn't a profile file name (letters, digits, - and _, ending .toml)");
     }
     Ok(())
+}
+
+/// The shipped profile named `name`: its file and text.
+fn shipped_by_name(name: &str) -> Option<(&'static str, &'static str)> {
+    shipped::PROFILES
+        .iter()
+        .find(|(_, src)| load_profile_str(src).is_ok_and(|p| p.name == name))
+        .copied()
+}
+
+/// A profile's text as TOML, without the devices it names.
+fn without_devices(text: &str) -> Option<toml::Value> {
+    let mut v: toml::Value = toml::from_str(text).ok()?;
+    if let Some(eco) = v.get_mut("ecosystem").and_then(|e| e.as_table_mut()) {
+        eco.remove("devices");
+    }
+    Some(v)
+}
+
+/// Whether two profiles say the same, apart from the devices they name (and
+/// comments and layout, which TOML doesn't see).
+fn same_but_devices(a: &str, b: &str) -> bool {
+    matches!((without_devices(a), without_devices(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// The devices a profile names, as changes that would name them again.
+fn devices_of(text: &str) -> Vec<DeviceEntryChange> {
+    load_profile_str(text)
+        .map(|p| {
+            let mut out: Vec<DeviceEntryChange> = p
+                .devices
+                .into_iter()
+                .map(|(device_id, d)| DeviceEntryChange {
+                    device_id,
+                    device_type: d.device_type,
+                    name: d.name,
+                })
+                .collect();
+            out.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+            out
+        })
+        .unwrap_or_default()
 }
 
 /// The innermost reason, which for a TOML error is the one with the line.
@@ -1208,6 +1298,51 @@ attribute = "on"
             .source("shelly-gen1.toml")
             .unwrap()
             .ends_with("# mine\n"));
+    }
+
+    /// A copy of a shipped profile that differs from homeCore's (an old copy,
+    /// say, with the dual-relay mistake) is said to, devices aside; taking
+    /// homeCore's keeps the devices it names.
+    #[test]
+    fn an_old_copy_is_noticed_and_replaced_keeping_its_devices() {
+        let (_d, set) = folder();
+        set.turn_on("tasmota.toml").unwrap();
+        let mine = |set: &ProfileSet| {
+            set.files()
+                .into_iter()
+                .find(|f| f.file == "tasmota.toml")
+                .unwrap()
+        };
+        assert!(!mine(&set).differs_from_shipped);
+
+        // Naming a device is not a difference.
+        set.set_devices(
+            "tasmota",
+            &[DeviceEntryChange {
+                device_id: "tasmota_hall".into(),
+                device_type: Some("switch".into()),
+                name: Some("Hall".into()),
+            }],
+        )
+        .unwrap();
+        assert!(!mine(&set).differs_from_shipped);
+
+        // The pre-0.1.126 relay IDs are.
+        let old = set
+            .source("tasmota.toml")
+            .unwrap()
+            .replace("\"tasmota_{device}_relay1\"", "\"{device}_relay1\"");
+        set.save("tasmota.toml", &old).unwrap();
+        assert!(mine(&set).differs_from_shipped);
+        assert!(set.shipped_text("tasmota.toml").is_some());
+
+        set.take_shipped("tasmota.toml").unwrap();
+        assert!(!mine(&set).differs_from_shipped);
+        let text = set.source("tasmota.toml").unwrap();
+        assert!(text.contains("tasmota_{device}_relay1"));
+        let kept = set.router().unwrap().configured_devices();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].2.name.as_deref(), Some("Hall"));
     }
 
     #[test]
