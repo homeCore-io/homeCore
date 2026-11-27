@@ -148,15 +148,11 @@ impl MqttClient {
         loop {
             match self.eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => {
-                    info!("MQTT connected; subscribing to homecore/#");
-                    self.client
-                        .subscribe("homecore/#", QoS::AtLeastOnce)
-                        .await
-                        .context("subscribe failed")?;
-                    for filter in &self.extra_subscriptions {
-                        info!(%filter, "Subscribing to ecosystem topic filter");
+                    info!("MQTT connected; subscribing");
+                    for filter in subscription_filters(&self.extra_subscriptions) {
+                        info!(%filter, "Subscribing to topic filter");
                         self.client
-                            .subscribe(filter, QoS::AtLeastOnce)
+                            .subscribe(&filter, QoS::AtLeastOnce)
                             .await
                             .with_context(|| format!("subscribe to {filter} failed"))?;
                     }
@@ -243,4 +239,93 @@ async fn take_over_one(cfg: &MqttClientConfig, client_id: &str) -> Result<()> {
     })
     .await;
     Ok(())
+}
+
+/// The filters to subscribe to: `homecore/#` and the extra ones, leaving out
+/// any another one already covers. A broker delivers a message once for each
+/// subscribed filter it matches, so overlapping filters (`homecore/#` and
+/// `#`) would hand core every message twice: a toggle command relayed twice
+/// undoes itself.
+fn subscription_filters(extra: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = std::iter::once("homecore/#".to_string())
+        .chain(extra.iter().cloned())
+        .collect();
+    all.dedup();
+    let mut kept: Vec<String> = Vec::new();
+    for (i, f) in all.iter().enumerate() {
+        let covered = all
+            .iter()
+            .enumerate()
+            .any(|(j, g)| j != i && filter_covers(g, f) && (!filter_covers(f, g) || j < i));
+        if !covered && !kept.contains(f) {
+            kept.push(f.clone());
+        }
+    }
+    kept
+}
+
+/// Whether every topic `inner` matches is matched by `outer` too.
+fn filter_covers(outer: &str, inner: &str) -> bool {
+    let o: Vec<&str> = outer.split('/').collect();
+    let n: Vec<&str> = inner.split('/').collect();
+    for (k, seg) in o.iter().enumerate() {
+        if *seg == "#" {
+            // `#` matches the level above it too, and anything below. A `$`
+            // topic is matched only by a filter that names `$` itself.
+            return !(k == 0 && n.first().is_some_and(|s| s.starts_with('$')));
+        }
+        let Some(other) = n.get(k) else {
+            return false;
+        };
+        match (*seg, *other) {
+            ("+", "#") => return false,
+            ("+", _) => {}
+            (a, b) if a == b => {}
+            _ => return false,
+        }
+    }
+    o.len() == n.len()
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+
+    #[test]
+    fn everything_takes_the_place_of_homecore() {
+        assert_eq!(subscription_filters(&["#".into()]), vec!["#".to_string()]);
+    }
+
+    #[test]
+    fn filters_that_do_not_overlap_are_all_kept() {
+        assert_eq!(
+            subscription_filters(&["stat/#".into(), "zigbee2mqtt/+".into()]),
+            vec!["homecore/#", "stat/#", "zigbee2mqtt/+"]
+        );
+    }
+
+    #[test]
+    fn a_filter_inside_another_goes() {
+        assert_eq!(
+            subscription_filters(&[
+                "homecore/devices/+/state".into(),
+                "stat/#".into(),
+                "stat/+/POWER".into()
+            ]),
+            vec!["homecore/#", "stat/#"]
+        );
+        assert_eq!(
+            subscription_filters(&["homecore/#".into()]),
+            vec!["homecore/#"]
+        );
+    }
+
+    #[test]
+    fn covering() {
+        assert!(filter_covers("a/#", "a"));
+        assert!(filter_covers("a/+/c", "a/b/c"));
+        assert!(!filter_covers("a/+/c", "a/#"));
+        assert!(!filter_covers("a/b", "a/b/c"));
+        assert!(!filter_covers("#", "$SYS/#"));
+    }
 }

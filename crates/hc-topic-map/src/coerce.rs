@@ -18,9 +18,17 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
         // --- Boolean conversions ---
 
         // "ON" / "OFF"  ↔  true / false
+        // Only ON and OFF: anything else (a lock's "LOCK", a cover's "OPEN")
+        // says nothing about being on, and must not read as off.
         "onoff_to_bool" => {
             let s = as_str(&value, name)?;
-            Ok(Value::Bool(s.eq_ignore_ascii_case("on")))
+            if s.eq_ignore_ascii_case("on") {
+                Ok(Value::Bool(true))
+            } else if s.eq_ignore_ascii_case("off") {
+                Ok(Value::Bool(false))
+            } else {
+                Err(anyhow!("onoff_to_bool: expected ON or OFF, got {s}"))
+            }
         }
         "bool_to_onoff" => {
             let b = as_bool(&value, name)?;

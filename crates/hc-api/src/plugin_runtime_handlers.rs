@@ -125,7 +125,7 @@ fn issue_key(state: &AppState, mut rec: RuntimeRecord) -> anyhow::Result<IssuedK
 }
 
 /// Push these clients off the broker now. See `hc_mqtt_client::take_over`.
-async fn take_over(state: &AppState, client_ids: &[String]) {
+pub(crate) async fn take_over(state: &AppState, client_ids: &[String]) {
     if let Some(cfg) = state.mqtt_takeover.as_ref() {
         hc_mqtt_client::take_over(cfg, client_ids).await;
     }

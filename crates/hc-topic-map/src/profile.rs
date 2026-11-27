@@ -82,10 +82,9 @@ pub struct StateTopicConfig {
     /// Auto-detect scalar type (string → bool/int/float).
     #[serde(default)]
     pub coerce_scalar: bool,
-    /// Force partial-update semantics for this topic regardless of other settings.
-    /// When true, the result is a JSON merge-patch rather than a full state replace.
-    /// Useful for field_map-based topics (like nodeInfo) that extract a single field
-    /// from a larger JSON payload and must not wipe out other device attributes.
+    /// Whether a reading merges into what the device already reports (the
+    /// default) or, `false`, replaces it whole: for a JSON topic that carries
+    /// the device's entire state, so keys it leaves out are dropped.
     pub partial: Option<bool>,
     /// Map raw scalar string → typed output value. Applied when `attribute` is set,
     /// after `coerce_scalar` and `coerce`. The lookup key is the stringified coerced

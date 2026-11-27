@@ -41,14 +41,22 @@ use tracing::{info, warn};
 async fn check_login(
     fixed: &HashMap<String, String>,
     live: &LiveLogins,
+    client_id: String,
     user: String,
     pass: String,
 ) -> bool {
+    // A configured client's id is its own: the broker drops whoever holds a
+    // client id when another connects with it, so any login using
+    // `internal.core` would push core itself off.
+    if fixed.contains_key(&client_id) && client_id != user {
+        tracing::warn!(%client_id, "broker login refused: another login's client id");
+        return false;
+    }
     if let Some(expected) = fixed.get(&user) {
         return same_bytes(expected.as_bytes(), pass.as_bytes());
     }
     let live = live.0.clone();
-    let accepted = tokio::task::spawn_blocking(move || live(&user, &pass))
+    let accepted = tokio::task::spawn_blocking(move || live(&client_id, &user, &pass))
         .await
         .unwrap_or(false);
     if !accepted {
@@ -88,8 +96,8 @@ pub struct ClientAcl {
 #[derive(Clone)]
 pub struct LiveLogins(pub Arc<LoginCheck>);
 
-/// `(username, password) -> accepted`.
-pub type LoginCheck = dyn Fn(&str, &str) -> bool + Send + Sync;
+/// `(client id, username, password) -> accepted`.
+pub type LoginCheck = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 
 impl std::fmt::Debug for LiveLogins {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -185,11 +193,13 @@ impl Broker {
         // the handler instead of its own map whenever one is set.
         if let (Some(fixed), Some(live)) = (auth, self.config.live_logins.clone()) {
             let fixed = Arc::new(fixed);
-            connection_settings.set_auth_handler(move |_client_id, user: String, pass: String| {
-                let fixed = fixed.clone();
-                let live = live.clone();
-                async move { check_login(&fixed, &live, user, pass).await }
-            });
+            connection_settings.set_auth_handler(
+                move |client_id: String, user: String, pass: String| {
+                    let fixed = fixed.clone();
+                    let live = live.clone();
+                    async move { check_login(&fixed, &live, client_id, user, pass).await }
+                },
+            );
         }
 
         // Plain-text MQTT v3.1.1 listener (Gen1 devices + internal core client).
@@ -412,7 +422,7 @@ mod tests {
     }
 
     fn live(user: &'static str, pass: &'static str) -> LiveLogins {
-        LiveLogins(Arc::new(move |u, p| u == user && p == pass))
+        LiveLogins(Arc::new(move |_, u, p| u == user && p == pass))
     }
 
     fn fixed() -> HashMap<String, String> {
@@ -422,24 +432,105 @@ mod tests {
     #[tokio::test]
     async fn a_configured_client_logs_in_by_its_password() {
         let l = live("plugin.a", "secret");
-        assert!(check_login(&fixed(), &l, "internal.core".into(), "x".into()).await);
-        assert!(!check_login(&fixed(), &l, "internal.core".into(), "y".into()).await);
+        assert!(
+            check_login(
+                &fixed(),
+                &l,
+                "internal.core".into(),
+                "internal.core".into(),
+                "x".into()
+            )
+            .await
+        );
+        assert!(
+            !check_login(
+                &fixed(),
+                &l,
+                "internal.core".into(),
+                "internal.core".into(),
+                "y".into()
+            )
+            .await
+        );
     }
 
     #[tokio::test]
     async fn a_login_core_made_is_accepted_beside_the_configured_ones() {
         let l = live("plugin.a", "secret");
-        assert!(check_login(&fixed(), &l, "plugin.a".into(), "secret".into()).await);
-        assert!(!check_login(&fixed(), &l, "plugin.a".into(), "wrong".into()).await);
-        assert!(!check_login(&fixed(), &l, "plugin.b".into(), "secret".into()).await);
+        assert!(
+            check_login(
+                &fixed(),
+                &l,
+                "plugin.a".into(),
+                "plugin.a".into(),
+                "secret".into()
+            )
+            .await
+        );
+        assert!(
+            !check_login(
+                &fixed(),
+                &l,
+                "plugin.a".into(),
+                "plugin.a".into(),
+                "wrong".into()
+            )
+            .await
+        );
+        assert!(
+            !check_login(
+                &fixed(),
+                &l,
+                "plugin.b".into(),
+                "plugin.b".into(),
+                "secret".into()
+            )
+            .await
+        );
     }
 
     /// A live check that would accept anything must not widen a configured
     /// client: the configured password decides for that name.
     #[tokio::test]
     async fn a_configured_name_is_never_handed_to_the_live_list() {
-        let anything = LiveLogins(Arc::new(|_, _| true));
-        assert!(!check_login(&fixed(), &anything, "internal.core".into(), "y".into()).await);
+        let anything = LiveLogins(Arc::new(|_, _, _| true));
+        assert!(
+            !check_login(
+                &fixed(),
+                &anything,
+                "internal.core".into(),
+                "internal.core".into(),
+                "y".into()
+            )
+            .await
+        );
+    }
+
+    /// Nobody else may connect as a configured client: it would push that
+    /// client (core itself) off the broker.
+    #[tokio::test]
+    async fn a_configured_clients_id_is_its_own() {
+        let anything = LiveLogins(Arc::new(|_, _, _| true));
+        assert!(
+            !check_login(
+                &fixed(),
+                &anything,
+                "internal.core".into(),
+                "tasmota-plug".into(),
+                "pw".into()
+            )
+            .await
+        );
+        assert!(
+            check_login(
+                &fixed(),
+                &anything,
+                "DVES_1A2B3C".into(),
+                "tasmota-plug".into(),
+                "pw".into()
+            )
+            .await
+        );
     }
 
     #[test]

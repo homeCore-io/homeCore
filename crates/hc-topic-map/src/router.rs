@@ -42,6 +42,12 @@ pub enum InboundResult {
         profile: Arc<str>,
         device_id: String,
         available: bool,
+        /// The ids of the devices it speaks for: `device_id`, and the profile's
+        /// `device_id` templates filled in from the topic (a Shelly's
+        /// `shellies/sh1/online` is for `shelly_sh1_relay0` and the rest).
+        /// A `{…}` left in one stands for any text; see
+        /// [`crate::pattern::id_matches`].
+        covers: Vec<String>,
     },
 }
 
@@ -69,6 +75,8 @@ struct CompiledAvailability {
     segments: Vec<Segment>,
     profile_prefix: String,
     profile_name: Arc<str>,
+    /// The profile's state topics' `device_id` templates.
+    id_templates: Arc<Vec<String>>,
     config: AvailabilityTopicConfig,
 }
 
@@ -87,6 +95,10 @@ pub struct EcosystemRouter {
     cmd_entries: Vec<CompiledCmd>,
     rhai_engine: Engine,
     rhai_ast: Option<AST>,
+    /// A device's topic captures as they were, where its id had to change
+    /// them (`zigbee2mqtt/Living Room` is `zigbee_Living_Room`): a command
+    /// goes to the device's own topic, not one made from its id.
+    raw_vars: std::sync::Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 impl EcosystemRouter {
@@ -191,6 +203,12 @@ impl EcosystemRouter {
                 _ => None,
             })
             .collect();
+        // Where its commands go too: homeCore hears what it relays (`cmnd/plug/POWER`)
+        // back from the broker, and that is not a device it is missing.
+        roots.extend(self.cmd_entries.iter().filter_map(|e| {
+            let first = e.config.target.as_deref()?.split('/').next()?;
+            (!first.is_empty() && !first.contains('{')).then(|| first.to_string())
+        }));
         roots.sort();
         roots.dedup();
         roots
@@ -250,6 +268,14 @@ impl EcosystemRouter {
             let prefix = profile.prefix.clone();
             let devices = Arc::new(profile.devices);
             let profile_name: Arc<str> = Arc::from(profile.name.as_str());
+            let mut templates: Vec<String> = profile
+                .state_topics
+                .iter()
+                .filter_map(|s| s.device_id.clone())
+                .collect();
+            templates.sort();
+            templates.dedup();
+            let id_templates = Arc::new(templates);
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
@@ -265,6 +291,7 @@ impl EcosystemRouter {
                     segments: parse_pattern(&ac.pattern),
                     profile_prefix: prefix.clone(),
                     profile_name: Arc::clone(&profile_name),
+                    id_templates: Arc::clone(&id_templates),
                     config: ac,
                 });
             }
@@ -284,6 +311,7 @@ impl EcosystemRouter {
         rhai_engine.on_debug(|s, _src, pos| debug!(target: "hc_topic_map::rhai", %pos, "{s}"));
 
         Ok(Self {
+            raw_vars: std::sync::Mutex::new(HashMap::new()),
             state_entries,
             availability_entries,
             cmd_entries,
@@ -329,6 +357,12 @@ impl EcosystemRouter {
 
         // Resolve device ID.
         let device_id = resolve_device_id(config, prefix, vars);
+        if vars.values().any(|v| sanitize_id(v) != *v) {
+            self.raw_vars
+                .lock()
+                .unwrap()
+                .insert(device_id.clone(), vars.clone());
+        }
         let device = describe_device(entry, &device_id, vars);
 
         // Apply optional Rhai transform on the raw payload first.
@@ -342,6 +376,19 @@ impl EcosystemRouter {
         let raw_str = std::str::from_utf8(&payload_bytes)
             .map_err(|_| anyhow!("Non-UTF-8 payload on {}", config.pattern))?
             .trim();
+
+        // Nothing in it (a retained message cleared, firmware with nothing to
+        // say): no reading. As a scalar it would read as "" — off, for a
+        // relay — and as a full state it would wipe the device's.
+        if raw_str.is_empty() {
+            return Ok(InboundResult::State {
+                profile: Arc::clone(&entry.profile_name),
+                device_id,
+                payload: Value::Object(Map::new()),
+                partial: true,
+                device,
+            });
+        }
 
         let mut json_value: Value = if let Ok(v) = serde_json::from_str(raw_str) {
             v
@@ -386,11 +433,13 @@ impl EcosystemRouter {
         // Full JSON object — apply field_map and coercions.
         let mapped = apply_field_map(&json_value, &config.field_map, &config.coerce)?;
 
-        // Determine partial flag:
-        //   - explicit profile override wins if set
-        //   - scalar attribute wraps (handled above) are always partial
-        //   - field_map topics without explicit partial default to full replace
-        let partial = config.partial.unwrap_or(config.attribute.is_some());
+        // Merged into what the device already reports, unless the profile says
+        // `partial = false`: a device behind a profile is usually fed by several
+        // topics (Tasmota's POWER and SENSOR, a Shelly's two components), and
+        // a full replace from one would wipe what the others said. Nothing
+        // mapped (a RESULT for a command it doesn't map) changes nothing.
+        let nothing = mapped.as_object().is_some_and(Map::is_empty);
+        let partial = nothing || config.partial.unwrap_or(true);
 
         Ok(InboundResult::State {
             profile: Arc::clone(&entry.profile_name),
@@ -446,10 +495,21 @@ impl EcosystemRouter {
             }
         };
 
+        // The templates that use one of this topic's captures, filled in.
+        let mut covers = vec![device_id.clone()];
+        for t in entry.id_templates.iter() {
+            if vars.keys().any(|k| t.contains(&format!("{{{k}}}"))) {
+                let id = sanitize_id(&render_template(t, vars));
+                if !covers.contains(&id) {
+                    covers.push(id);
+                }
+            }
+        }
         Ok(Some(InboundResult::Availability {
             profile: Arc::clone(&entry.profile_name),
             device_id,
             available,
+            covers,
         }))
     }
 
@@ -466,13 +526,42 @@ impl EcosystemRouter {
         payload: &[u8],
     ) -> Result<Option<Vec<OutboundResult>>> {
         for entry in &self.cmd_entries {
-            if let Some(vars) = match_segments(&entry.segments, topic) {
+            if let Some(mut vars) = match_segments(&entry.segments, topic) {
+                self.restore_raw_vars(topic, &mut vars);
                 let results = self.apply_cmd(entry, &vars, payload)?;
                 debug!(%topic, count = results.len(), "Cmd topic matched");
                 return Ok(Some(results));
             }
         }
         Ok(None)
+    }
+
+    /// Put back what a device's id changed in its captures: a capture from
+    /// the id (`Living_Room`) is the topic's (`Living Room`) when that is
+    /// what the id was made from.
+    fn restore_raw_vars(&self, topic: &str, vars: &mut HashMap<String, String>) {
+        let Some(id) = topic
+            .strip_prefix("homecore/devices/")
+            .and_then(|t| t.strip_suffix("/cmd"))
+        else {
+            return;
+        };
+        let raw = self.raw_vars.lock().unwrap();
+        let Some(was) = raw.get(id) else {
+            return;
+        };
+        for (k, v) in vars.iter_mut() {
+            if let Some(r) = was.get(k).filter(|r| sanitize_id(r) == *v) {
+                *v = r.clone();
+            }
+        }
+    }
+
+    /// Carry over what an older router learned of devices' own topic names,
+    /// so a reload doesn't send commands astray until each reports again.
+    pub fn learn_from(&self, older: &EcosystemRouter) {
+        let was = older.raw_vars.lock().unwrap().clone();
+        self.raw_vars.lock().unwrap().extend(was);
     }
 
     fn apply_cmd(
@@ -516,7 +605,11 @@ impl EcosystemRouter {
 
         // If `attribute` is set, extract that single field and publish its scalar value.
         if let Some(attr_name) = &config.attribute {
-            let attr_val = cmd_value.get(attr_name).cloned().unwrap_or(Value::Null);
+            // A command that doesn't set this topic's attribute (brightness
+            // to a relay's POWER topic) publishes nothing here, not `null`.
+            let Some(attr_val) = cmd_value.get(attr_name).cloned() else {
+                return Ok(Vec::new());
+            };
             let coerced = if let Some(coercion) = config.coerce.get(attr_name) {
                 coerce::apply(coercion, attr_val)?
             } else {
@@ -609,10 +702,15 @@ fn apply_field_map(
         for (src_key, dst_key) in field_map {
             if let Some(raw_val) = extract_path(payload, src_key) {
                 let coerced = if let Some(coercion) = coerce_map.get(dst_key) {
-                    coerce::apply(coercion, raw_val.clone()).unwrap_or_else(|e| {
-                        warn!(coercion, error = %e, "Coercion failed; using raw value");
-                        raw_val
-                    })
+                    // A value the coercion can't read is left out, as an
+                    // attribute topic's would be: a lock's "LOCK" is not `on`.
+                    match coerce::apply(coercion, raw_val) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug!(coercion, error = %e, "Coercion failed; value left out");
+                            continue;
+                        }
+                    }
                 } else {
                     raw_val
                 };

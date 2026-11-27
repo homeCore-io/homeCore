@@ -525,8 +525,14 @@ pub async fn reset_login(
         Ok(l) => l,
         Err(r) => return *r,
     };
-    match tokio::task::spawn_blocking(move || logins.reset(&user)).await {
-        Ok(Ok(password)) => Json(json!({ "password": password })).into_response(),
+    let l = Arc::clone(&logins);
+    let who = user.clone();
+    match tokio::task::spawn_blocking(move || l.reset(&who)).await {
+        Ok(Ok(password)) => {
+            // Connected with the old password, it stays connected until pushed off.
+            push_off(&s, &logins, &user).await;
+            Json(json!({ "password": password })).into_response()
+        }
         Ok(Err(e)) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -542,9 +548,23 @@ pub async fn remove_login(
         Ok(l) => l,
         Err(r) => return *r,
     };
-    match logins.remove(&user) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    let l = Arc::clone(&logins);
+    let who = user.clone();
+    match tokio::task::spawn_blocking(move || l.remove(&who)).await {
+        Ok(Ok(())) => {
+            push_off(&s, &logins, &user).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Push a device login's connection off the broker, as it last connected:
+/// removing a login, or changing its password, must end what it already has.
+async fn push_off(s: &AppState, logins: &crate::mqtt_logins::DeviceLogins, user: &str) {
+    if let Some(client_id) = logins.take_client(user) {
+        crate::plugin_runtime_handlers::take_over(s, &[client_id]).await;
     }
 }
 

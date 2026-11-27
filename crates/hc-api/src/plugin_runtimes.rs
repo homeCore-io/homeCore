@@ -167,7 +167,14 @@ pub struct BrokerLogins {
 }
 
 impl BrokerLogins {
+    /// A login by its user and password, with the client id it connects as
+    /// taken to be the user's.
     pub fn accepts(&self, user: &str, pass: &str) -> bool {
+        self.accepts_as(user, user, pass)
+    }
+
+    /// A login by its user and password, connecting as `client_id`.
+    pub fn accepts_as(&self, client_id: &str, user: &str, pass: &str) -> bool {
         if pass.is_empty() {
             return false;
         }
@@ -175,7 +182,21 @@ impl BrokerLogins {
             return hc_auth::api_key::verify_token(pass, &rt.key_hash);
         }
         if let Some(devices) = self.devices.as_ref().filter(|d| d.has(user)) {
-            return devices.accepts(user, pass);
+            // A device takes no client id of homeCore's or a plugin's: the
+            // broker drops whoever holds an id when another connects with it.
+            if self.is_reserved_client_id(client_id) {
+                tracing::warn!(
+                    user,
+                    client_id,
+                    "device login refused: a client id of homeCore's or a plugin's"
+                );
+                return false;
+            }
+            let ok = devices.accepts(user, pass);
+            if ok {
+                devices.connected_as(user, client_id);
+            }
+            return ok;
         }
         match self.config_for(user) {
             Some(path) => {
@@ -183,6 +204,16 @@ impl BrokerLogins {
             }
             None => false,
         }
+    }
+
+    /// A client id homeCore or one of its plugins connects as.
+    fn is_reserved_client_id(&self, id: &str) -> bool {
+        ["plugin.", "internal.", "core."]
+            .iter()
+            .any(|p| id.starts_with(p))
+            || self.listed.iter().any(|(l, _)| l == id)
+            || matches!(self.runtimes.by_plugin_id(id), Ok(Some(_)))
+            || self.config_for(id).is_some_and(|p| p.exists())
     }
 
     fn config_for(&self, plugin_id: &str) -> Option<PathBuf> {

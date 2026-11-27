@@ -161,6 +161,18 @@ async fn a_tasmota_through_its_profile_is_a_device_that_obeys() -> Result<()> {
     .map_err(|_| anyhow::anyhow!("the command never reached the plug"))?;
     assert_eq!(topic, "cmnd/plug/Backlog");
     assert_eq!(payload, "POWER OFF");
+    // Once: core subscribed to `homecore/#` and `#`, and the broker handed it
+    // each command twice, so a toggle undid itself.
+    let again = timeout(Duration::from_millis(1500), async {
+        loop {
+            let (t, _) = heard.recv().await.expect("the plug's loop runs");
+            if t.starts_with("cmnd/plug/") {
+                return t;
+            }
+        }
+    })
+    .await;
+    assert!(again.is_err(), "the command reached the plug twice");
 
     // It goes offline the way a Tasmota says so.
     plug.publish("tele/plug/LWT", QoS::AtLeastOnce, true, "Offline")

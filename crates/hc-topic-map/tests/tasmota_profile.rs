@@ -127,3 +127,61 @@ fn a_tasmota_is_a_switch() {
     assert_eq!(id, "tasmota_plug");
     assert_eq!(device_type.as_deref(), Some("switch"));
 }
+
+fn route_full(topic: &str, payload: &str) -> (Value, bool) {
+    match router_with_scripts()
+        .route_inbound(topic, payload.as_bytes())
+        .unwrap()
+    {
+        Some(InboundResult::State {
+            payload, partial, ..
+        }) => (payload, partial),
+        other => panic!("expected State for {topic}, got {other:?}"),
+    }
+}
+
+/// `tele/SENSOR` every TelePeriod used to replace the whole state, wiping the
+/// `on` that `stat/POWER` set. Profile JSON topics merge now.
+#[test]
+fn a_sensor_reading_merges_into_what_power_said() {
+    let (_, partial) = route_full("tele/plug/SENSOR", r#"{"ENERGY":{"Power":5}}"#);
+    assert!(partial);
+}
+
+/// A RESULT for a command the profile doesn't map changes nothing, rather
+/// than replacing the state with nothing.
+#[test]
+fn a_reply_with_nothing_mapped_changes_nothing() {
+    let (p, partial) = route_full("stat/plug/RESULT", r#"{"Command":"Unknown"}"#);
+    assert_eq!(p, serde_json::json!({}));
+    assert!(partial);
+}
+
+/// An empty message (a retained topic cleared) is not "off".
+#[test]
+fn an_empty_power_message_is_no_reading() {
+    let (p, partial) = route_full("stat/plug/POWER", "");
+    assert_eq!(p, serde_json::json!({}));
+    assert!(partial);
+}
+
+/// A command that doesn't set a topic's attribute publishes nothing to it.
+#[test]
+fn a_command_without_the_attribute_publishes_nothing() {
+    let out = router_with_scripts()
+        .route_outbound(
+            "homecore/devices/tasmota_x_relay1/cmd",
+            br#"{"brightness_pct":50}"#,
+        )
+        .unwrap();
+    assert_eq!(out.map(|v| v.len()), Some(0));
+}
+
+/// A device named like the prefix and suffix together used to panic the
+/// router, and with it the whole state bridge.
+#[test]
+fn a_command_to_a_device_named_like_the_pattern_does_not_panic() {
+    let r = router_with_scripts();
+    let _ = r.route_outbound("homecore/devices/tasmota_relay1/cmd", br#"{"on":true}"#);
+    let _ = r.route_outbound("homecore/devices/shelly_relay0/cmd", br#"{"on":true}"#);
+}

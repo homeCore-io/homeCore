@@ -505,7 +505,10 @@ async fn main() -> Result<()> {
         v5_port: config.broker.v5_port.filter(|p| *p != 0),
         live_logins: Some(hc_broker::LiveLogins({
             let live = live_logins.clone();
-            Arc::new(move |user, pass| live.get().is_some_and(|l| l.accepts(user, pass)))
+            Arc::new(move |client_id, user, pass| {
+                live.get()
+                    .is_some_and(|l| l.accepts_as(client_id, user, pass))
+            })
         })),
         tls_port: config.broker.tls_port,
         cert_path: config.broker.cert_path.clone(),

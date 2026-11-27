@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Stored {
@@ -47,6 +48,9 @@ pub struct DeviceLogin {
 pub struct DeviceLogins {
     path: PathBuf,
     last: Mutex<HashMap<String, DateTime<Utc>>>,
+    /// The client id each login last connected with, to push it off the
+    /// broker when the login is removed or its password changed.
+    clients: Mutex<HashMap<String, String>>,
     /// Writes one at a time.
     write: Mutex<()>,
 }
@@ -77,15 +81,30 @@ impl DeviceLogins {
         Self {
             path: profiles_dir.into().join("logins.toml"),
             last: Mutex::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
             write: Mutex::new(()),
         }
     }
 
+    /// The logins, for checking one: a file that can't be read accepts none.
     fn read(&self) -> File {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|t| toml::from_str(&t).ok())
-            .unwrap_or_default()
+        self.read_for_change().unwrap_or_else(|e| {
+            warn!(path = %self.path.display(), error = %format!("{e:#}"), "Device logins can't be read");
+            File::default()
+        })
+    }
+
+    /// The logins, to change: no file is none yet, but one that can't be read
+    /// or doesn't parse is an error, not none — writing back a single login
+    /// over it would lose every other.
+    fn read_for_change(&self) -> Result<File> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(t) => {
+                toml::from_str(&t).context("logins.toml doesn't parse; fix or remove it first")
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(File::default()),
+            Err(e) => Err(e).context("reading logins.toml"),
+        }
     }
 
     fn store(&self, file: &File) -> Result<()> {
@@ -133,7 +152,7 @@ impl DeviceLogins {
     pub fn add(&self, profile: &str, user: &str, label: &str) -> Result<String> {
         check_user(user)?;
         let _w = self.write.lock().unwrap();
-        let mut file = self.read();
+        let mut file = self.read_for_change()?;
         if file.login.iter().any(|l| l.user == user) {
             bail!("there is already a login {user}");
         }
@@ -152,7 +171,7 @@ impl DeviceLogins {
     /// A new password for a login; the old one stops working.
     pub fn reset(&self, user: &str) -> Result<String> {
         let _w = self.write.lock().unwrap();
-        let mut file = self.read();
+        let mut file = self.read_for_change()?;
         let l = file
             .login
             .iter_mut()
@@ -166,7 +185,7 @@ impl DeviceLogins {
 
     pub fn remove(&self, user: &str) -> Result<()> {
         let _w = self.write.lock().unwrap();
-        let mut file = self.read();
+        let mut file = self.read_for_change()?;
         let before = file.login.len();
         file.login.retain(|l| l.user != user);
         if file.login.len() == before {
@@ -195,6 +214,20 @@ impl DeviceLogins {
                 .insert(user.to_string(), Utc::now());
         }
         ok
+    }
+
+    /// Note the client id a login connected with.
+    pub fn connected_as(&self, user: &str, client_id: &str) {
+        self.clients
+            .lock()
+            .unwrap()
+            .insert(user.to_string(), client_id.to_string());
+    }
+
+    /// The client id a login last connected with, forgotten: to push it off
+    /// the broker now that its password no longer works.
+    pub fn take_client(&self, user: &str) -> Option<String> {
+        self.clients.lock().unwrap().remove(user)
     }
 
     /// Whether `user` is a device login here (to tell it apart from others).
@@ -241,6 +274,19 @@ mod tests {
 
         logins.remove("tasmota-kitchen_plug").unwrap();
         assert!(!logins.accepts("tasmota-kitchen_plug", &pw2));
+    }
+
+    /// A logins file that doesn't parse (a typo made by hand) is not empty:
+    /// making a login must not write one login back over all the others.
+    #[test]
+    fn a_logins_file_that_doesnt_parse_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logins.toml");
+        std::fs::write(&path, "[[login]\nuser = ").unwrap();
+        let logins = DeviceLogins::new(dir.path());
+        assert!(logins.add("tasmota", "tasmota-plug", "").is_err());
+        assert!(logins.remove("anyone").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[[login]\nuser = ");
     }
 
     #[test]
