@@ -1326,6 +1326,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             patch(profile_handlers::set_devices),
         )
         .route("/mqtt/device-types", get(profile_handlers::device_types))
+        .route("/mqtt/devices/{id}", get(profile_handlers::device_profile))
         .route("/mqtt/catalog", post(profile_handlers::add_catalog))
         .route("/mqtt/reload", post(profile_handlers::reload))
         .route("/mqtt/on", post(profile_handlers::turn_on))

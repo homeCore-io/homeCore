@@ -5423,6 +5423,25 @@ paths:
       responses:
         "200":
           description: The new password
+  /mqtt/devices/{id}:
+    get:
+      operationId: getMqttDeviceProfile
+      summary: The ecosystem a device comes in through
+      description: The profile (and its file) that takes the device in, for its page to link to. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Its ecosystem
+        "404":
+          description: No such device, or no ecosystem takes it in
   /devices/removed:
     get:
       operationId: listRemovedDevices
