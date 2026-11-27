@@ -268,10 +268,26 @@ async fn run(
     tracing::info!(url = %key.url, runtime_id = %key.runtime_id, "connecting");
 
     // Check in and log in to the broker, retrying with the reason on the page.
+    // The broker login is in the loop too: the check above can pass and the
+    // login still fail a moment later (homeCore restarting), and that ended
+    // the container.
+    let check_in = Arc::new(tokio::sync::Notify::new());
     let mut wait = std::time::Duration::from_secs(5);
-    let name = loop {
-        match page::test_key(&shared, &key).await {
-            Ok(name) => break name,
+    let (name, notices) = loop {
+        let attempt = async {
+            let name = page::test_key(&shared, &key).await?;
+            let notices = plugin::connect_and_register(
+                &key,
+                &broker_host,
+                &shared.hello.capabilities,
+                env!("CARGO_PKG_VERSION"),
+                check_in.clone(),
+            )
+            .await?;
+            anyhow::Ok((name, notices))
+        };
+        match attempt.await {
+            Ok(done) => break done,
             Err(e) => {
                 let msg = format!("{e:#}");
                 tracing::warn!(error = %msg, "not connected yet; trying again");
@@ -289,15 +305,6 @@ async fn run(
         wait = (wait * 2).min(std::time::Duration::from_secs(60));
     };
 
-    let check_in = Arc::new(tokio::sync::Notify::new());
-    let notices = plugin::connect_and_register(
-        &key,
-        &broker_host,
-        &shared.hello.capabilities,
-        env!("CARGO_PKG_VERSION"),
-        check_in.clone(),
-    )
-    .await?;
     tracing::info!(plugin_id = %key.username, %name, "connected to homeCore");
     shared.set(|s| {
         s.state = Phase::Connected;

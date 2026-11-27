@@ -379,6 +379,8 @@ pub(crate) fn event_frame(
         View::PluginUi => {
             serde_json::to_value(&event).map(|v| event_access::plugin_ui_only(&v).to_string())
         }
+        View::CommandMasked => serde_json::to_value(normalize_event(event))
+            .map(|v| event_access::command_masked(&v).to_string()),
         _ => serde_json::to_string(&normalize_event(event)),
     };
     match json {

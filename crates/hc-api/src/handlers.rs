@@ -6485,7 +6485,7 @@ pub async fn put_plugin_config(
                 }
             }
             drop_redacted(&mut patch);
-            match crate::config_writer::apply_section_patch(&current, &patch) {
+            match crate::config_writer::apply_plugin_patch(&current, &patch) {
                 Ok(s) => s,
                 Err(e) => {
                     return (

@@ -536,6 +536,20 @@ fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
 /// Public to `crate` so `ModeManager` can reuse the calculation.
 ///
 /// Returns `None` if the event doesn't occur on this day (polar regions).
+/// The configured zone's offset from UTC on `date`, in minutes, taken at
+/// local noon. Today's offset was used for every date, so a sun time worked
+/// out for a day across a DST change (ModeManager looks ahead) was an hour
+/// out.
+fn utc_offset_on(tz: chrono_tz::Tz, date: chrono::NaiveDate) -> f64 {
+    use chrono::TimeZone;
+    let noon = date.and_hms_opt(12, 0, 0).unwrap_or_default();
+    tz.from_local_datetime(&noon)
+        .earliest()
+        .map(|t| t.offset().fix().local_minus_utc())
+        .unwrap_or(0) as f64
+        / 60.0
+}
+
 pub(crate) fn solar_event_time(
     lat: f64,
     lon: f64,
@@ -558,8 +572,7 @@ pub(crate) fn solar_event_time(
         SunEventType::SolarNoon => {
             // Solar noon is just 12:00 adjusted for longitude (UTC result).
             let noon_min = 720.0 - 4.0 * lon - equation_of_time(day_of_year);
-            let utc_offset_min =
-                hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
+            let utc_offset_min = utc_offset_on(hc_time::configured_tz(), date);
             let total_min = (noon_min + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
             let h = (total_min / 60.0).floor() as u32;
             let m = (total_min % 60.0).abs() as u32;
@@ -593,7 +606,7 @@ pub(crate) fn solar_event_time(
 
     // event_minutes is UTC; convert to local wall-clock time so it can be
     // compared directly against hc_time::now_local().time() in the scheduler.
-    let utc_offset_min = hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
+    let utc_offset_min = utc_offset_on(hc_time::configured_tz(), date);
     let total_minutes = (event_minutes + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
     let h = (total_minutes / 60.0) as u32;
     let m = (total_minutes % 60.0) as u32;
@@ -626,6 +639,16 @@ mod cron_tests {
             .unwrap()
             .and_hms_opt(h, m, 0)
             .unwrap()
+    }
+
+    /// A sun time for another date uses that date's offset, not today's.
+    #[test]
+    fn the_offset_is_the_one_on_the_date() {
+        let ny = chrono_tz::America::New_York;
+        let jan = NaiveDate::from_ymd_opt(2027, 1, 15).unwrap();
+        let jul = NaiveDate::from_ymd_opt(2027, 7, 15).unwrap();
+        assert_eq!(super::utc_offset_on(ny, jan), -300.0);
+        assert_eq!(super::utc_offset_on(ny, jul), -240.0);
     }
 
     /// Clocks going forward: 01:59 then 03:00, so 02:30 is never a tick.

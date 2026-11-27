@@ -136,6 +136,10 @@ impl EventLog {
                     event: event_access::plugin_ui_only(&e.event),
                     audience: e.audience,
                 }),
+                View::CommandMasked => Some(LogEntry {
+                    event: event_access::command_masked(&e.event),
+                    ..e.clone()
+                }),
                 View::Nothing => None,
             })
             .take(limit)

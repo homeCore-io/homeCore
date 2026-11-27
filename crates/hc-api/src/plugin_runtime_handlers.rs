@@ -30,6 +30,9 @@ fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
 
+/// Whether runtimes may connect. Only what a runtime itself calls is refused
+/// while it is off; an admin can still list, rename, reset and remove the
+/// runtimes already added, to tidy up after turning the feature off.
 fn feature_enabled(state: &AppState) -> bool {
     state.plugin_runtimes_config.enabled
 }
@@ -147,7 +150,47 @@ pub fn authenticate_runtime(
         .and_then(|v| v.strip_prefix("Bearer "))?
         .trim();
     let rec = store(state).get(runtime_id).ok().flatten()?;
-    hc_auth::api_key::verify_token(presented, &rec.key_hash).then_some(rec)
+    verified(runtime_id, presented, &rec.key_hash).then_some(rec)
+}
+
+/// Whether `presented` is the runtime's key. A runtime checks in every few
+/// seconds, and each check was a full Argon2 verify, open to anyone who
+/// knows a runtime id (it is on the runtime's own page): a way to load the
+/// server. A key verified once is known by its SHA-256 for as long as the
+/// stored hash is unchanged (a Reset login changes it), and at most two
+/// verifies run at once; past that a check is refused, not queued.
+pub(crate) fn verified(runtime_id: &str, presented: &str, key_hash: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    static KNOWN: Mutex<Option<HashMap<String, (String, [u8; 32])>>> = Mutex::new(None);
+    static CHECKING: AtomicUsize = AtomicUsize::new(0);
+    const CHECKS_AT_ONCE: usize = 2;
+
+    let print: [u8; 32] = Sha256::digest(presented.as_bytes()).into();
+    let known = |m: &mut Option<HashMap<String, (String, [u8; 32])>>| {
+        m.get_or_insert_with(HashMap::new)
+            .get(runtime_id)
+            .is_some_and(|(h, p)| h == key_hash && *p == print)
+    };
+    if known(&mut KNOWN.lock().unwrap_or_else(|e| e.into_inner())) {
+        return true;
+    }
+    if CHECKING.fetch_add(1, Ordering::SeqCst) >= CHECKS_AT_ONCE {
+        CHECKING.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    }
+    let ok = hc_auth::api_key::verify_token(presented, key_hash);
+    CHECKING.fetch_sub(1, Ordering::SeqCst);
+    if ok {
+        KNOWN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(runtime_id.to_string(), (key_hash.to_string(), print));
+    }
+    ok
 }
 
 // ── Admin ────────────────────────────────────────────────────────────────────
@@ -1307,6 +1350,23 @@ pub async fn update_interpreter(
 
 #[cfg(test)]
 mod interpreter_tests {
+    /// A runtime's key is verified once and then known, until it changes.
+    #[test]
+    fn a_runtime_key_is_known_until_it_changes() {
+        let key = hc_auth::api_key::generate().unwrap();
+        let other = hc_auth::api_key::generate().unwrap();
+        let id = format!("rt-test-{}", uuid::Uuid::new_v4());
+        assert!(super::verified(&id, &key.full_token, &key.hash));
+        assert!(
+            super::verified(&id, &key.full_token, &key.hash),
+            "known now"
+        );
+        assert!(!super::verified(&id, &other.full_token, &key.hash));
+        // A Reset login: the old key no longer passes, from the cache or not.
+        assert!(!super::verified(&id, &key.full_token, &other.hash));
+        assert!(super::verified(&id, &other.full_token, &other.hash));
+    }
+
     use super::*;
     use hc_state::plugin_runtime_store::PlacementRecord;
 

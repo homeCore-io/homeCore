@@ -179,7 +179,7 @@ impl BrokerLogins {
             return false;
         }
         if let Ok(Some(rt)) = self.runtimes.by_plugin_id(user) {
-            return hc_auth::api_key::verify_token(pass, &rt.key_hash);
+            return crate::plugin_runtime_handlers::verified(&rt.runtime_id, pass, &rt.key_hash);
         }
         // A device login made before a plugin took its name gives way to the plugin.
         if let Some(devices) = self
