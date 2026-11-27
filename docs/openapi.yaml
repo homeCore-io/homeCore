@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: homeCore API
-  version: "0.1.125"
+  version: "0.1.126"
   description: |
     homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -51,6 +51,8 @@ servers:
 tags:
   - name: auth
     description: Login, user profile, and user management (admin only)
+  - name: mqtt
+    description: Devices over MQTT, the ecosystem profiles (admin only)
   - name: devices
     description: Device registry and state control
   - name: areas
@@ -5036,6 +5038,391 @@ paths:
 
 # =============================================================================
 
+  /mqtt:
+    get:
+      operationId: mqttOverview
+      summary: Devices over MQTT, at a glance
+      description: |
+        The ecosystem profiles (0.1.126): each profile file in the profiles
+        folder, whether it loaded (and why not), how many devices it takes in
+        and how many have no type; the shipped profiles that are off; whether
+        the device type catalog is there; and the topics on the broker in the
+        last hour that no profile took in, each with the shipped profile that
+        would. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The profiles and what the broker carries
+          content:
+            application/json:
+              schema:
+                type: object
+        "403":
+          description: Not an admin
+        "503":
+          description: homeCore has no profiles folder
+  /mqtt/profiles/{name}:
+    get:
+      operationId: getMqttProfile
+      summary: One profile and the devices it takes in
+      description: |
+        The profile's state, and each device it takes in: its name and type,
+        what the profile says it is (`configured`), what its ecosystem says
+        it is (`suggestion`, from Zigbee2MQTT's device list), and a few of
+        its readings. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The profile and its devices
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: No profile of that name
+  /mqtt/profiles/{name}/devices:
+    patch:
+      operationId: setMqttProfileDevices
+      summary: Say what devices are
+      description: |
+        Sets each device's `device_type` and `name` in the profile's
+        `[ecosystem.devices]` table, keeping the rest of the file (comments
+        too), and applies it at once: the device is registered with that type
+        and gets its schema from the catalog. A change with neither removes
+        the device's entry. A type the catalog doesn't have changes nothing.
+        Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changes]
+              properties:
+                changes:
+                  type: array
+                  items:
+                    type: object
+                    required: [device_id]
+                    properties:
+                      device_id:
+                        type: string
+                      device_type:
+                        type: string
+                        nullable: true
+                      name:
+                        type: string
+                        nullable: true
+      responses:
+        "200":
+          description: Saved and applied
+        "400":
+          description: A change that can't be made, said why
+  /mqtt/device-types:
+    get:
+      operationId: listMqttDeviceTypes
+      summary: The device type catalog's types
+      description: Each type with its description and attributes (and which are writable), for choosing a device's type. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The types
+          content:
+            application/json:
+              schema:
+                type: object
+  /mqtt/catalog:
+    post:
+      operationId: addMqttCatalog
+      summary: Add homeCore's device type catalog
+      description: Writes the catalog homeCore ships into the profiles folder when it has none, and applies it. `added` is false when one was there. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Done
+  /mqtt/reload:
+    post:
+      operationId: reloadMqttProfiles
+      summary: Read the profiles folder again
+      description: For a change made to the files by hand. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Done
+  /mqtt/on:
+    post:
+      operationId: turnOnMqttProfile
+      summary: Turn an ecosystem on
+      description: |
+        `{file}`: a shipped profile (`shelly-gen1.toml`) is copied into the
+        profiles folder with the transforms it uses and the device type
+        catalog when they are missing; one turned off comes back as it was.
+        Applies at once. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+      responses:
+        "200":
+          description: On
+        "400":
+          description: Already on, or no such profile
+  /mqtt/off:
+    post:
+      operationId: turnOffMqttProfile
+      summary: Turn an ecosystem off
+      description: |
+        `{file}`: the profile stays in the folder as `<file>.off`, changes and
+        all, to turn on again. Its devices stay and stop being updated. Admin
+        only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+      responses:
+        "200":
+          description: Off
+        "400":
+          description: Not on
+  /mqtt/preview:
+    get:
+      operationId: previewMqttProfile
+      summary: What turning an ecosystem on would take in
+      description: The devices a shipped or turned-off profile would make from what the broker carries now, with the type it gives each. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The devices
+  /mqtt/try:
+    post:
+      operationId: tryMqttProfile
+      summary: Try a profile on a message
+      description: |
+        `{text, topic, payload}`: what the profile in `text` would make of one
+        message (`kind` is `state`, `availability`, `no_match` or `error`),
+        without saving it. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, topic]
+              properties:
+                text:
+                  type: string
+                topic:
+                  type: string
+                payload:
+                  type: string
+      responses:
+        "200":
+          description: What it would make
+        "400":
+          description: The profile doesn't load, said with its line
+  /mqtt/files/{file}:
+    get:
+      operationId: getMqttProfileFile
+      summary: A profile's text
+      description: The text of a profile file, on or off, and whether it is on. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The profile
+        "404":
+          description: No such file
+    put:
+      operationId: putMqttProfileFile
+      summary: Save a profile
+      description: |
+        `{text}`: saves a profile, new or changed, and applies it. Refused,
+        with the file left as it was, when it doesn't load (said with its
+        line) or its name is another profile's. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+      responses:
+        "200":
+          description: Saved and applied
+        "400":
+          description: Refused, said why
+    delete:
+      operationId: deleteMqttProfileFile
+      summary: Delete a profile
+      description: Deletes the file, on or off. Its devices stay. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+  /mqtt/logins:
+    get:
+      operationId: listMqttLogins
+      summary: Device logins
+      description: |
+        The logins devices use to connect to the broker themselves, one per
+        device, never with their passwords; `broker_asks` says whether the
+        broker asks for one yet. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: profile
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The logins
+    post:
+      operationId: addMqttLogin
+      summary: Make a device login
+      description: |
+        `{profile, user, label}`. The answer holds its password, the only
+        time homeCore shows it; it is kept hashed. It works at once. Admin
+        only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile, user]
+              properties:
+                profile:
+                  type: string
+                user:
+                  type: string
+                label:
+                  type: string
+      responses:
+        "200":
+          description: The login and its password
+        "400":
+          description: The name is taken or not allowed
+  /mqtt/logins/{user}:
+    delete:
+      operationId: removeMqttLogin
+      summary: Remove a device login
+      description: The device can't connect with it again; a connection already open stays until it drops. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Removed
+  /mqtt/logins/{user}/password:
+    post:
+      operationId: resetMqttLogin
+      summary: A new password for a device login
+      description: The old one stops working. The answer holds the new one, once. Admin only.
+      tags: [mqtt]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The new password
   /devices/removed:
     get:
       operationId: listRemovedDevices

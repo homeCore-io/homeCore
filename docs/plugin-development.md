@@ -591,7 +591,6 @@ point — not the SDKs, which pass slots through.
 | Other devices' availability (`subscribe_availability`) | ✓ | — | — | — |
 | Other devices' schemas (`subscribe_schema`) | ✓ | — | — | — |
 | Devices offline on SIGTERM, with a stop hook | ✓ | ✓ | ✓ | ✓ |
-
 | Caller, `requires_role` signed_in | ✓ | ✓ | ✓ | ✓ |
 | Own REST access (`api_scopes`, `api_access`) | ✓ | ✓ | ✓ | ✓ |
 | Released to the Catalog | ✓ | ✓ | ✓ | — |
@@ -600,12 +599,15 @@ The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release. Nothing is published to npm, crates.io, PyPI or NuGet yet;
 install SDKs from their GitHub tags.
 
-**Node.js and .NET plugins have no release path to the Catalog yet**: there is
-no release workflow for them and no plugin runtime that runs them. They run as
+**Node.js plugins** are released to the Catalog for the Node.js plugin runtime
+by hc-scripts' `node-release.yml`: one pure-JavaScript artifact, installed
+from the lock, with a `"homecore"` block in `package.json`. `plugins/hc-matter`
+is the example; the docs site's "Releasing a Node.js plugin" has the rules.
+
+**.NET plugins have no release path to the Catalog yet.** They run as
 `[[plugins]]` entries on the homeCore host, which starts and supervises them
 like any other plugin. An entry has a `binary` and a `config` and no
-arguments, so `binary` must be an executable: a .NET single-file publish, or
-a small script that runs `node` on the plugin.
+arguments, so `binary` must be an executable: a .NET single-file publish.
 
 ### Packaging a Python plugin
 

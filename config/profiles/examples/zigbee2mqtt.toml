@@ -170,3 +170,22 @@ target = "zigbee2mqtt/{device}/set"
   color_temp     = "kelvin_to_mired"
   # Z2M's transition is in seconds
   transition_ms  = "ms_to_secs"
+
+
+# ---------------------------------------------------------------------------
+# What individual devices are
+#
+# Zigbee2MQTT publishes every kind of device on the same topic, so the topic
+# can't say what a device is. Say it here, by homeCore device ID: the type
+# gives the device its schema from device-types.toml, so the app shows its
+# controls, and the name is what homeCore shows (a rename in the app still
+# wins). A device not listed keeps its readings and no controls.
+# ---------------------------------------------------------------------------
+
+# [ecosystem.devices.zigbee_living_room_light]
+# device_type = "light"
+# name        = "Living room light"
+#
+# [ecosystem.devices.zigbee_hall_motion]
+# device_type = "motion_sensor"
+# name        = "Hall motion"

@@ -21,6 +21,7 @@ pub mod glue;
 pub mod household;
 pub mod mode_manager;
 pub mod pictures;
+pub mod profiles;
 pub mod room_lights;
 pub mod rooms;
 pub mod rule_loader;
@@ -117,6 +118,7 @@ pub struct Core {
     location: LocationConfig,
     router: Option<Arc<EcosystemRouter>>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
+    profiles: Option<Arc<profiles::ProfileSet>>,
     notify: Option<Arc<NotificationService>>,
     /// Where a Notify step's picture is fetched from, filled by the API layer.
     plugin_files: pictures::PluginFilesSlot,
@@ -176,6 +178,7 @@ impl Core {
             location: LocationConfig::default(),
             router: None,
             device_types: None,
+            profiles: None,
             notify: None,
             plugin_files: Default::default(),
             modes_path: None,
@@ -273,6 +276,13 @@ impl Core {
 
     pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
         self.device_types = Some(device_types);
+        self
+    }
+
+    /// The profiles from a folder, which can change while homeCore runs. Takes
+    /// the place of [`Self::with_router`] and [`Self::with_device_types`].
+    pub fn with_profiles(mut self, profiles: Arc<profiles::ProfileSet>) -> Self {
+        self.profiles = Some(profiles);
         self
     }
 
@@ -374,6 +384,7 @@ impl Core {
         let bridge_state = self.state.clone();
         let bridge_router = self.router.clone();
         let bridge_device_types = self.device_types.clone();
+        let bridge_profiles = self.profiles.clone();
         let bridge_publish = self.publish.clone();
         let bridge_log_tx = self.log_tx.clone();
         let bridge_log_ring = self.log_ring.clone();
@@ -395,6 +406,9 @@ impl Core {
                 }
                 if let Some(ph) = bridge_publish.clone() {
                     bridge = bridge.with_publish(ph);
+                }
+                if let Some(p) = bridge_profiles.clone() {
+                    bridge = bridge.with_profiles(p);
                 }
                 if let (Some(tx), Some(ring)) = (bridge_log_tx.clone(), bridge_log_ring.clone()) {
                     bridge = bridge.with_log_stream(tx, ring);

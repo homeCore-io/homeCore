@@ -31,6 +31,7 @@ pub mod loader;
 pub mod pattern;
 pub mod profile;
 pub mod router;
+pub mod shipped;
 
 pub use device_types::{canonical_device_type_name, DeviceTypeRegistry};
 pub use router::{EcosystemRouter, InboundResult, OutboundResult};

@@ -15,10 +15,6 @@ use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::NotificationService;
 use hc_state::StateStore;
-use hc_topic_map::{
-    loader::{load_profiles_from_dir, load_transforms_from_dir},
-    DeviceTypeRegistry, EcosystemRouter,
-};
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -783,44 +779,17 @@ async fn main() -> Result<()> {
     .with_management_responses(management_responses.clone())
     .with_alert_channel(config.alerts.notify_channel.clone());
 
-    let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
-    match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
-        Ok(registry) => {
-            let count = registry.type_names().count();
-            info!(path = %device_types_path.display(), count, "Device type registry loaded");
-            core = core.with_device_types(Arc::new(registry));
-        }
-        Err(_e) if !device_types_path.exists() => {
-            info!(path = %device_types_path.display(), "No device type registry found; typed devices will not have auto schemas");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, path = %device_types_path.display(), "Could not load device type registry")
-        }
-    }
-
-    // Load ecosystem profiles and build the router.  Done before spawning the
-    // MQTT client so add_subscription("#") runs first.
-    // Transforms are every `*.rhai` file beside the profiles; a script that
-    // doesn't compile is skipped, as a profile that doesn't parse is.
-    match load_profiles_from_dir(&config.profiles.dir) {
-        Ok(profiles) if !profiles.is_empty() => {
-            let scripts = load_transforms_from_dir(&config.profiles.dir);
-            let router = EcosystemRouter::with_scripts(profiles, &scripts);
-            mqtt_client.add_subscription("#");
-            info!(
-                scripts = scripts.len(),
-                "Ecosystem router ready; subscribed to all topics (#)"
-            );
-            core = core.with_router(router);
-        }
-        Ok(_) => info!(
-            "No ecosystem profiles found in {}; running without router",
-            config.profiles.dir
-        ),
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not load profiles directory; running without router")
-        }
-    }
+    // Ecosystem profiles: the folder of profiles, the device type catalog and
+    // transforms, which the app can change while homeCore runs. Core hears
+    // every topic on the broker, so that a profile turned on later takes its
+    // devices in, and so the app can show what the broker carries that no
+    // profile takes in.
+    let profile_set = hc_core::profiles::ProfileSet::load(&config.profiles.dir);
+    // Logins for devices that connect to the broker themselves, beside the
+    // profiles: the broker checks them live, the app makes them.
+    let device_logins = Arc::new(hc_api::mqtt_logins::DeviceLogins::new(&config.profiles.dir));
+    mqtt_client.add_subscription("#");
+    core = core.with_profiles(Arc::clone(&profile_set));
 
     // ── 13. MQTT forwarder → internal bus ──────────────────────────────────
     // Only MqttMessage events flow through here; typed events go to pub_bus.
@@ -898,6 +867,7 @@ async fn main() -> Result<()> {
     let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
     let _ = live_logins.set(hc_api::plugin_runtimes::BrokerLogins {
         runtimes: store.plugin_runtimes(),
+        devices: Some(Arc::clone(&device_logins)),
         config_plugins_dir: install_base.join("config").join("plugins"),
         listed: config
             .plugins
@@ -1324,6 +1294,8 @@ async fn main() -> Result<()> {
         app_state
     }
     .with_backup_paths(backup_paths)
+    .with_profiles(Arc::clone(&profile_set))
+    .with_mqtt_logins(Arc::clone(&device_logins))
     .with_fire_history(fire_history)
     .with_hub_vars(hub_vars)
     .with_pauses(pauses)

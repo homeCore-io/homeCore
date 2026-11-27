@@ -162,6 +162,8 @@ pub struct BrokerLogins {
     pub config_plugins_dir: PathBuf,
     /// Plugins listed in `homecore.toml` with their own config path.
     pub listed: Vec<(String, PathBuf)>,
+    /// Devices that log in themselves (Settings › Devices over MQTT).
+    pub devices: Option<Arc<crate::mqtt_logins::DeviceLogins>>,
 }
 
 impl BrokerLogins {
@@ -171,6 +173,9 @@ impl BrokerLogins {
         }
         if let Ok(Some(rt)) = self.runtimes.by_plugin_id(user) {
             return hc_auth::api_key::verify_token(pass, &rt.key_hash);
+        }
+        if let Some(devices) = self.devices.as_ref().filter(|d| d.has(user)) {
+            return devices.accepts(user, pass);
         }
         match self.config_for(user) {
             Some(path) => {
@@ -293,7 +298,24 @@ mod tests {
             runtimes: Arc::new(hc_state::PluginRuntimeStore::new(db).unwrap()),
             config_plugins_dir: dir.join("plugins"),
             listed: vec![("plugin.listed".into(), dir.join("listed.toml"))],
+            devices: None,
         }
+    }
+
+    /// A device's own login (Settings › Devices over MQTT) lets it in from the
+    /// moment it is made, and not once it is removed.
+    #[test]
+    fn a_device_logs_in_with_its_own_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let devices = Arc::new(crate::mqtt_logins::DeviceLogins::new(dir.path()));
+        let mut l = logins(dir.path());
+        l.devices = Some(Arc::clone(&devices));
+        assert!(!l.accepts("tasmota-plug", "anything"));
+        let pw = devices.add("tasmota", "tasmota-plug", "Plug").unwrap();
+        assert!(l.accepts("tasmota-plug", &pw));
+        assert!(!l.accepts("tasmota-plug", "wrong"));
+        devices.remove("tasmota-plug").unwrap();
+        assert!(!l.accepts("tasmota-plug", &pw));
     }
 
     #[test]

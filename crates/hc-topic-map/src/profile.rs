@@ -38,6 +38,22 @@ pub struct EcosystemProfile {
     pub availability_topics: Vec<AvailabilityTopicConfig>,
     #[serde(default)]
     pub cmd_topics: Vec<CmdTopicConfig>,
+    /// What individual devices are, keyed by homeCore device ID. Overrides a
+    /// state topic's `device_type` and `name` for that one device.
+    #[serde(default)]
+    pub devices: HashMap<String, DeviceConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// One device
+// ---------------------------------------------------------------------------
+
+/// What one device is: its type, which gives it a schema from the device type
+/// catalog, and the name homeCore shows for it.
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default, PartialEq, Eq)]
+pub struct DeviceConfig {
+    pub device_type: Option<String>,
+    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +94,13 @@ pub struct StateTopicConfig {
     pub value_map: HashMap<String, Value>,
     /// Optional Rhai function name for fully custom payload transformation.
     pub transform: Option<String>,
+    /// What the devices on this topic are, e.g. `"switch"`. A device with a
+    /// type is registered with it and gets that type's schema from the
+    /// device type catalog, so the app can show its controls.
+    pub device_type: Option<String>,
+    /// The name homeCore shows for a new device, with `{var}` substitution
+    /// from the topic captures. Defaults to the device ID.
+    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
