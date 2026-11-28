@@ -127,10 +127,29 @@ async fn invalid(s: &AppState, b: &RotationBody) -> Option<String> {
         }
     }
     match s.store.get_device(&b.device_id).await {
-        Ok(Some(_)) => None,
-        Ok(None) => Some(format!("there is no device “{}”", b.device_id)),
-        Err(e) => Some(e.to_string()),
+        Ok(Some(_)) => {}
+        Ok(None) => return Some(format!("there is no device “{}”", b.device_id)),
+        Err(e) => return Some(e.to_string()),
     }
+    // Each choice's command is one the device takes: a typo'd or another
+    // plugin's action was saved, and every play then sent what the device
+    // ignored. Only checked when the device says what it takes.
+    let schema = s.store.get_device_schema(&b.device_id).await.ok().flatten();
+    if let Some(schema) = schema.filter(|sc| !sc.actions.is_empty()) {
+        for (i, c) in b.choices.iter().enumerate() {
+            let Some(action) = c.command.get("action").and_then(|a| a.as_str()) else {
+                continue;
+            };
+            if !schema.actions.iter().any(|a| a.id == action) {
+                return Some(format!(
+                    "choice {}: “{}” has no “{action}” command",
+                    i + 1,
+                    b.device_id
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// `GET /rotations`
@@ -283,6 +302,9 @@ pub async fn play_rotation(
         let topic = format!("homecore/devices/{}/cmd", c.device_id);
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
         if let Err(e) = ph.publish(&topic, bytes).await {
+            // It didn't play: the rotation stays where it was, rather than
+            // having moved on past a choice that never played.
+            let _ = rotations::undo(&s.store, &c).await;
             return failed(e);
         }
     }

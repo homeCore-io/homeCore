@@ -784,8 +784,18 @@ async fn run_rotation(
                     rule = %ctx.rule_name, rotation = %c.rotation.name, choice = %c.name, device = %c.device_id,
                     "action: PlayFromRotation — playing"
                 );
-                publish_device_command(ctx, &c.device_id, c.command, rule_change(ctx, "rule"))
-                    .await?;
+                let sent = publish_device_command(
+                    ctx,
+                    &c.device_id,
+                    c.command.clone(),
+                    rule_change(ctx, "rule"),
+                )
+                .await;
+                if let Err(e) = sent {
+                    // It didn't play: the rotation stays where it was.
+                    crate::rotations::undo(store, &c).await?;
+                    return Err(e);
+                }
             }
         }
     }

@@ -31,11 +31,15 @@ pub struct Chosen {
     pub command: Value,
     /// Choices the device no longer offers, skipped.
     pub missing: Vec<usize>,
+    /// Where it was before this, and where this left it: for [`undo`] when
+    /// the command can't be sent.
+    pub before: hc_types::rotation::RotationState,
+    pub after: hc_types::rotation::RotationState,
 }
 
 #[derive(Debug)]
 pub enum Outcome {
-    Chosen(Chosen),
+    Chosen(Box<Chosen>),
     NoRotation,
     /// Of the choices for now, the device offers none any more.
     NothingOffered {
@@ -137,14 +141,30 @@ pub async fn choose(
         });
     };
     let choice = &rotation.choices[index];
-    Ok(Outcome::Chosen(Chosen {
+    Ok(Outcome::Chosen(Box::new(Chosen {
         device_id,
         index,
         name: name_on_device(choice, &attrs, schema.as_ref()),
         command: choice.command.clone(),
         missing: state.missing.clone(),
+        before,
+        after: state,
         rotation,
-    }))
+    })))
+}
+
+/// Put a rotation back where it was before `chosen`, when its command
+/// couldn't be sent: it had moved on for a choice that never played. Left as
+/// it is when something has moved it on since.
+pub async fn undo(store: &StateStore, chosen: &Chosen) -> Result<()> {
+    let _turn = TURN.lock().await;
+    let now = store.rotation_state(chosen.rotation.id).await?;
+    if now == chosen.after {
+        store
+            .put_rotation_state(&chosen.rotation, &chosen.after, &chosen.before)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Save a rotation, waiting for any play in progress: one that read the old
@@ -464,6 +484,49 @@ mod tests {
             ..c.clone()
         };
         assert_eq!(name_on_device(&labelled, &attrs, Some(&s)), "Fall");
+    }
+
+    /// A play whose command couldn't be sent leaves the rotation where it
+    /// was: the next play is the same choice, not the one after.
+    #[tokio::test]
+    async fn a_play_undone_leaves_the_rotation_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            dir.path().join("s.redb").to_str().unwrap(),
+            dir.path().join("h.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        store
+            .upsert_device(&hc_types::device::DeviceState::new(
+                "lamp",
+                "Lamp",
+                "plugin.wled",
+            ))
+            .await
+            .unwrap();
+        let r = Rotation {
+            id: Uuid::new_v4(),
+            name: "Moods".into(),
+            device_id: "lamp".into(),
+            choices: (0..3)
+                .map(|i| choice(json!({ "action": "apply_preset", "preset_id": i })))
+                .collect(),
+            order: hc_types::rotation::RotationOrder::InTurn,
+            advance: RotationAdvance::EachUse,
+        };
+        store.upsert_rotation(&r).await.unwrap();
+        let play = || async {
+            match choose(&store, r.id, None, false).await.unwrap() {
+                Outcome::Chosen(c) => c,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(play().await.index, 0);
+        let second = play().await;
+        assert_eq!(second.index, 1);
+        undo(&store, &second).await.unwrap();
+        assert_eq!(play().await.index, 1);
     }
 
     #[test]
