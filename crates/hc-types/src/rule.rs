@@ -1120,6 +1120,25 @@ pub enum Action {
     /// (enabled: true, action: RoomOff(room: "living_room"))
     /// ```
     RoomOff { room: String },
+    /// Play a rotation's choice for now on a device: the next one, or the
+    /// one this period already has (`GET /rotations`). `device_id` plays
+    /// it on another device of the same kind than the rotation's own.
+    ///
+    /// ```ron
+    /// (enabled: true, action: PlayFromRotation(rotation_id: "…"))
+    /// ```
+    PlayFromRotation {
+        rotation_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<String>,
+    },
+    /// Move a rotation on without playing anything: "skip this one". The
+    /// next use plays the new choice.
+    ///
+    /// ```ron
+    /// (enabled: true, action: AdvanceRotation(rotation_id: "…"))
+    /// ```
+    AdvanceRotation { rotation_id: uuid::Uuid },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

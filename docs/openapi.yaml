@@ -65,6 +65,8 @@ tags:
     description: Automation rule CRUD, dry-run, import/export
   - name: scenes
     description: Named state snapshots
+  - name: rotations
+    description: Shared lists of device commands played one at a time
   - name: events
     description: Event log (REST) and live stream (WebSocket)
   - name: plugins
@@ -1836,6 +1838,190 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   # ---------------------------------------------------------------------------
+  # Rotations
+  # ---------------------------------------------------------------------------
+  /rotations:
+    get:
+      operationId: listRotations
+      summary: List rotations, each with what plays now
+      description: |
+        A rotation is a shared list of commands for one kind of device (WLED
+        presets, Sonos playlists or favorites) that rules play from one at a
+        time, with the `PlayFromRotation` step. It moves on each use, or once
+        an hour / day / week, or on a cron schedule; within a period every use
+        plays the same choice. Needs `automations:read`.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Rotations, by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RotationView"
+    post:
+      operationId: createRotation
+      summary: Make a rotation
+      description: Needs `automations:write`. 422 says what's wrong in words.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotationBody"
+      responses:
+        "201":
+          description: The rotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotationView"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /rotations/{id}:
+    get:
+      operationId: getRotation
+      summary: Get a rotation and what plays now
+      description: Needs `automations:read`.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RotationId"
+      responses:
+        "200":
+          description: The rotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotationView"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateRotation
+      summary: Replace a rotation
+      description: |
+        Needs `automations:write`. New choices or a new order start it
+        afresh; a new name, device or pace keeps its place.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RotationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotationBody"
+      responses:
+        "200":
+          description: The rotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotationView"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      operationId: deleteRotation
+      summary: Delete a rotation
+      description: Needs `automations:write`. A rule step that plays it then does nothing.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RotationId"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /rotations/{id}/play:
+    post:
+      operationId: playRotation
+      summary: Play the choice for now
+      description: |
+        As the `PlayFromRotation` step does: the next choice, or the one this
+        period already has, sent to the rotation's device (or `device_id`).
+        A choice the device no longer offers (a deleted playlist, a removed
+        preset) is skipped and listed in `missing`. Needs `devices:command`.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RotationId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_id:
+                  type: string
+                  description: Another device of the same kind to play it on
+      responses:
+        "200":
+          description: What played
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [played, index, device_id, missing]
+                properties:
+                  played: { type: string }
+                  index: { type: integer }
+                  device_id: { type: string }
+                  missing:
+                    type: array
+                    items: { type: integer }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The device offers none of its choices any more
+
+  /rotations/{id}/advance:
+    post:
+      operationId: advanceRotation
+      summary: Move a rotation on without playing
+      description: |
+        "Skip this one": the next use plays the new choice, which holds for the
+        rest of the period. Needs `devices:command`.
+      tags: [rotations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RotationId"
+      responses:
+        "200":
+          description: What it moved on to
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current: { type: integer }
+                  current_name: { type: string }
+                  missing:
+                    type: array
+                    items: { type: integer }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The device offers none of its choices any more
+
+  # ---------------------------------------------------------------------------
   # Events
   # ---------------------------------------------------------------------------
   /events:
@@ -2746,7 +2932,10 @@ paths:
         record carries that slug as `room`. `room_lights_changed` says Room on
         or Room off ran: `room_id`, `room_name`, `on`, the `lights` and
         `scenes` it commanded, `snapshot_saved`, `snapshot_used`, and `source`
-        (`api` or `rule`). `device_command_sent` carries the command whole
+        (`api` or `rule`). `rotation_changed` carries a rotation as written,
+        `rotation_removed` its `rotation_id`, and `rotation_advanced` what one
+        plays now (`current`, `current_name`) and which choices are `missing`;
+        all three need `automations:read`. `device_command_sent` carries the command whole
         to a caller who may command devices (`devices:command` or
         `devices:write`); to one who may only read them (`devices:read`), its
         secrets (codes, PINs, passwords, tokens) read `__redacted__`.
@@ -2754,6 +2943,7 @@ paths:
         **Event types:** `device_state_changed`, `device_availability_changed`,
         `device_added`, `device_removed`, `device_metadata_changed`,
         `room_changed`, `room_removed`, `room_lights_changed`, `scene_changed`, `scene_removed`,
+        `rotation_changed`, `rotation_removed`, `rotation_advanced`,
         `rule_changed`, `rule_removed`, `device_name_changed`, `device_schema_changed`, `device_command_sent`,
         `device_battery_low`, `device_battery_recovered`, `rule_fired`,
         `scene_activated`, `plugin_registered`, `plugin_offline`,
@@ -9560,6 +9750,14 @@ components:
         type: string
         format: uuid
       description: Scene UUID
+    RotationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Rotation UUID
 
     PluginId:
       name: id
@@ -9586,6 +9784,13 @@ components:
 
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    UnprocessableEntity:
+      description: The request is well formed but can't be used; `error` says why
       content:
         application/json:
           schema:
@@ -10565,6 +10770,8 @@ components:
         | `Conditional` | `condition` — a Rhai bool expression (string) or a `Condition` (object, `if_checks`), `then_actions`, `else_if` (`[{condition, actions}]`), `else_actions` |
         | `RoomOn` | `room` — id, slug, alias or name. Brings back what Room off saved, or every light fully on |
         | `RoomOff` | `room`. Saves the room's lights when one is on, then turns them all off |
+        | `PlayFromRotation` | `rotation_id`, `device_id?`. Plays the rotation's choice for now (`/rotations`) on its device, or on `device_id` |
+        | `AdvanceRotation` | `rotation_id`. Moves the rotation on without playing |
 
         For device-targeting actions, prefer `device` in authored rules so the
         automation remains readable and stable across plugin-specific ID
@@ -10619,6 +10826,88 @@ components:
 
     # ---- Scenes ----
 
+    RotationBody:
+      type: object
+      required: [name, device_id, choices]
+      properties:
+        name: { type: string }
+        device_id:
+          type: string
+          description: The device it is made for
+        choices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [command]
+            properties:
+              label:
+                type: string
+                description: What to call it; the command's own words when absent
+              command:
+                type: object
+                additionalProperties: true
+                description: |
+                  A device command, e.g. `{"action": "play_playlist", "playlist": "Chill"}`
+                  or `{"action": "apply_preset", "preset_id": 7}`.
+        order:
+          type: string
+          enum: [in_turn, shuffle, random]
+          default: in_turn
+          description: In turn; each once in a random order before any again; or random, never twice running
+        advance:
+          description: |
+            `"each_use"` (default), `{"every": {"n": 1, "unit": "hour" | "day" | "week"}}`
+            (local time), or `{"schedule": {"cron": "0 0 */2 * * *"}}` (the scheduler's syntax).
+          oneOf:
+            - type: string
+              enum: [each_use]
+            - type: object
+              required: [every]
+              properties:
+                every:
+                  type: object
+                  required: [n, unit]
+                  properties:
+                    n: { type: integer, minimum: 1 }
+                    unit: { type: string, enum: [hour, day, week] }
+            - type: object
+              required: [schedule]
+              properties:
+                schedule:
+                  type: object
+                  required: [cron]
+                  properties:
+                    cron: { type: string }
+    RotationView:
+      allOf:
+        - $ref: "#/components/schemas/RotationBody"
+        - type: object
+          required: [id, now]
+          properties:
+            id:
+              type: string
+              format: uuid
+            now:
+              type: object
+              description: |
+                Where it is. `next` is known in turn and within a shuffled
+                round, not for random. `missing` are choices its device no
+                longer offers, skipped until it does again.
+              properties:
+                current: { type: [integer, "null"] }
+                current_name: { type: [string, "null"] }
+                next: { type: [integer, "null"] }
+                next_name: { type: [string, "null"] }
+                missing:
+                  type: array
+                  items: { type: integer }
+                missing_names:
+                  type: array
+                  items: { type: string }
+                last_played:
+                  type: [string, "null"]
+                  format: date-time
     Scene:
       type: object
       required: [id, name, states]

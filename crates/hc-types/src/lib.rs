@@ -30,6 +30,7 @@ pub mod mqtt;
 pub mod plugin_capabilities;
 pub mod plugin_notice;
 pub mod plugin_ui;
+pub mod rotation;
 pub mod rule;
 pub mod schema;
 /// Which attributes are temperatures, the scales they arrive in, and how to

@@ -26,6 +26,7 @@ pub mod plugin_runtime_store;
 pub mod plugin_state_store;
 pub mod refresh_token_store;
 pub mod room_lights_store;
+pub mod rotation_store;
 pub mod rule_store;
 pub mod schema_store;
 pub mod user_store;
@@ -39,6 +40,7 @@ use history::HistoryStore;
 use plugin_state_store::PluginStateStore;
 use refresh_token_store::RefreshTokenStore;
 use room_lights_store::RoomLightsStore;
+use rotation_store::RotationStore;
 use rule_store::RuleStore;
 use schema_store::SchemaStore;
 use user_store::UserStore;
@@ -65,6 +67,7 @@ pub struct StateStore {
     plugin_state: Arc<PluginStateStore>,
     plugin_runtimes: Arc<PluginRuntimeStore>,
     room_lights: Arc<RoomLightsStore>,
+    rotations: Arc<RotationStore>,
     /// Where changes to the house's catalogue are announced. See [`on_change`].
     ///
     /// [`on_change`]: StateStore::on_change
@@ -135,6 +138,7 @@ impl StateStore {
             plugin_state,
             plugin_runtimes,
             room_lights,
+            rotations,
         ) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
@@ -173,6 +177,7 @@ impl StateStore {
             let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
             let plugin_runtimes = PluginRuntimeStore::new(Arc::clone(&db))?;
             let room_lights = RoomLightsStore::new(Arc::clone(&db))?;
+            let rotations = RotationStore::new(Arc::clone(&db))?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -187,6 +192,7 @@ impl StateStore {
                 plugin_state,
                 plugin_runtimes,
                 room_lights,
+                rotations,
             ))
         })
         .await??;
@@ -205,6 +211,7 @@ impl StateStore {
             plugin_state: Arc::new(plugin_state),
             plugin_runtimes: Arc::new(plugin_runtimes),
             room_lights: Arc::new(room_lights),
+            rotations: Arc::new(rotations),
             changes: Arc::new(OnceLock::new()),
         })
     }
@@ -678,6 +685,72 @@ impl StateStore {
     pub async fn list_scenes(&self) -> Result<Vec<Scene>> {
         let store = Arc::clone(&self.rules);
         tokio::task::spawn_blocking(move || store.list_scenes()).await?
+    }
+
+    // --- Rotations ---
+
+    pub async fn list_rotations(&self) -> Result<Vec<hc_types::rotation::Rotation>> {
+        let store = Arc::clone(&self.rotations);
+        tokio::task::spawn_blocking(move || store.list()).await?
+    }
+
+    pub async fn get_rotation(&self, id: Uuid) -> Result<Option<hc_types::rotation::Rotation>> {
+        let store = Arc::clone(&self.rotations);
+        tokio::task::spawn_blocking(move || store.get(id)).await?
+    }
+
+    pub async fn upsert_rotation(&self, rotation: &hc_types::rotation::Rotation) -> Result<()> {
+        let store = Arc::clone(&self.rotations);
+        let r = rotation.clone();
+        tokio::task::spawn_blocking(move || store.put(&r)).await??;
+        self.announce(|| Event::RotationChanged {
+            timestamp: chrono::Utc::now(),
+            rotation: rotation.clone(),
+        });
+        Ok(())
+    }
+
+    pub async fn delete_rotation(&self, id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.rotations);
+        let removed = tokio::task::spawn_blocking(move || store.delete(id)).await??;
+        if removed {
+            self.announce(|| Event::RotationRemoved {
+                timestamp: chrono::Utc::now(),
+                rotation_id: id,
+            });
+        }
+        Ok(removed)
+    }
+
+    pub async fn rotation_state(&self, id: Uuid) -> Result<hc_types::rotation::RotationState> {
+        let store = Arc::clone(&self.rotations);
+        tokio::task::spawn_blocking(move || store.state(id)).await?
+    }
+
+    /// Save where a rotation is, and say so when what plays or what is
+    /// missing changed.
+    pub async fn put_rotation_state(
+        &self,
+        rotation: &hc_types::rotation::Rotation,
+        before: &hc_types::rotation::RotationState,
+        state: &hc_types::rotation::RotationState,
+    ) -> Result<()> {
+        let store = Arc::clone(&self.rotations);
+        let (id, st) = (rotation.id, state.clone());
+        tokio::task::spawn_blocking(move || store.put_state(id, &st)).await??;
+        if before.current != state.current || before.missing != state.missing {
+            self.announce(|| Event::RotationAdvanced {
+                timestamp: chrono::Utc::now(),
+                rotation_id: rotation.id,
+                current: state.current,
+                current_name: state
+                    .current
+                    .and_then(|i| rotation.choices.get(i))
+                    .map(|c| c.name()),
+                missing: state.missing.clone(),
+            });
+        }
+        Ok(())
     }
 
     // --- Areas ---

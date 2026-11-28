@@ -740,6 +740,49 @@ async fn execute_one(
 
 /// `RoomOn` / `RoomOff`: the room's lights through [`crate::room_lights`],
 /// each command sent as this rule's.
+/// Play a rotation's choice for now (or, `skip`, only move it on).
+async fn run_rotation(
+    ctx: &Arc<ExecutorContext>,
+    rotation_id: Uuid,
+    device: Option<&str>,
+    skip: bool,
+) -> Result<()> {
+    let Some(store) = ctx.state.as_ref() else {
+        warn!(rule = %ctx.rule_name, "action: rotation — no state store, skipping");
+        return Ok(());
+    };
+    match crate::rotations::choose(store, rotation_id, device, skip).await? {
+        crate::rotations::Outcome::NoRotation => {
+            warn!(rule = %ctx.rule_name, rotation = %rotation_id, "action: rotation — there is no such rotation");
+        }
+        crate::rotations::Outcome::NothingOffered { rotation } => {
+            warn!(
+                rule = %ctx.rule_name, rotation = %rotation.name,
+                "action: rotation — its device offers none of its choices any more; nothing played"
+            );
+        }
+        crate::rotations::Outcome::Chosen(c) => {
+            if !c.missing.is_empty() {
+                warn!(
+                    rule = %ctx.rule_name, rotation = %c.rotation.name, missing = c.missing.len(),
+                    "action: rotation — skipped choices its device no longer offers"
+                );
+            }
+            if skip {
+                info!(rule = %ctx.rule_name, rotation = %c.rotation.name, next = %c.name, "action: AdvanceRotation — moved on");
+            } else {
+                info!(
+                    rule = %ctx.rule_name, rotation = %c.rotation.name, choice = %c.name, device = %c.device_id,
+                    "action: PlayFromRotation — playing"
+                );
+                publish_device_command(ctx, &c.device_id, c.command, rule_change(ctx, "rule"))
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_room_lights(ctx: &Arc<ExecutorContext>, name: &str, on: bool) -> Result<()> {
     let step = if on { "RoomOn" } else { "RoomOff" };
     let Some(store) = ctx.state.as_ref() else {
@@ -1708,6 +1751,14 @@ fn run_single_action(
             Action::RoomOn { room } => run_room_lights(&ctx, &room, true).await?,
             Action::RoomOff { room } => run_room_lights(&ctx, &room, false).await?,
 
+            Action::PlayFromRotation {
+                rotation_id,
+                device_id,
+            } => run_rotation(&ctx, rotation_id, device_id.as_deref(), false).await?,
+            Action::AdvanceRotation { rotation_id } => {
+                run_rotation(&ctx, rotation_id, None, true).await?
+            }
+
             // ── PingHost ──────────────────────────────────────────────────────────
             Action::PingHost {
                 host,
@@ -2469,6 +2520,33 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
         },
         Action::RoomOn { room } => format!("turn on the lights in {room}"),
         Action::RoomOff { room } => format!("turn off the lights in {room}"),
+        Action::PlayFromRotation {
+            rotation_id,
+            device_id,
+        } => {
+            let name = rotation_name(&ctx, *rotation_id).await;
+            match device_id {
+                Some(d) => format!(
+                    "play the next from {name} on {}",
+                    device_log_name(ctx.state.as_ref(), d).await
+                ),
+                None => format!("play the next from {name}"),
+            }
+        }
+        Action::AdvanceRotation { rotation_id } => {
+            format!("move {} on", rotation_name(&ctx, *rotation_id).await)
+        }
+    }
+}
+
+/// A rotation's name for a trace, or its id when it is gone.
+async fn rotation_name(ctx: &ExecutorContext, id: Uuid) -> String {
+    match &ctx.state {
+        Some(store) => match store.get_rotation(id).await {
+            Ok(Some(r)) => r.name,
+            _ => id.to_string(),
+        },
+        None => id.to_string(),
     }
 }
 
@@ -2516,6 +2594,8 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::IgnoreAlerts { .. } => "IgnoreAlerts",
         Action::RoomOn { .. } => "RoomOn",
         Action::RoomOff { .. } => "RoomOff",
+        Action::PlayFromRotation { .. } => "PlayFromRotation",
+        Action::AdvanceRotation { .. } => "AdvanceRotation",
     }
 }
 

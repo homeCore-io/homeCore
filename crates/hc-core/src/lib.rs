@@ -24,6 +24,7 @@ pub mod pictures;
 pub mod profiles;
 pub mod room_lights;
 pub mod rooms;
+pub mod rotations;
 pub mod rule_loader;
 pub mod rule_resolver;
 pub mod scheduler;

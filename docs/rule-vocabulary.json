@@ -612,6 +612,16 @@
       ]
     },
     {
+      "tag": "AdvanceRotation",
+      "fields": [
+        {
+          "name": "rotation_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
       "tag": "CallService",
       "fields": [
         {
@@ -922,6 +932,21 @@
           "name": "timeout_ms",
           "type": "integer",
           "required": false
+        }
+      ]
+    },
+    {
+      "tag": "PlayFromRotation",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "rotation_id",
+          "type": "string",
+          "required": true
         }
       ]
     },

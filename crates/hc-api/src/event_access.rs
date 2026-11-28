@@ -92,6 +92,9 @@ pub fn audience(event: &Event) -> Audience {
 
         // GET /automations: rules as written, and what they did.
         Event::RuleFired { .. }
+        | Event::RotationChanged { .. }
+        | Event::RotationRemoved { .. }
+        | Event::RotationAdvanced { .. }
         | Event::RuleChanged { .. }
         | Event::RuleRemoved { .. }
         | Event::RuleEvaluationFailed { .. }

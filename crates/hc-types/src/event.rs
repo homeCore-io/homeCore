@@ -226,6 +226,29 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         scene_id: uuid::Uuid,
     },
+    /// A rotation was created or edited, as `GET /rotations/{id}` shows it.
+    RotationChanged {
+        timestamp: DateTime<Utc>,
+        rotation: crate::rotation::Rotation,
+    },
+    /// A rotation was deleted.
+    RotationRemoved {
+        timestamp: DateTime<Utc>,
+        rotation_id: uuid::Uuid,
+    },
+    /// A rotation moved on, or found a choice its device no longer offers:
+    /// what plays now (`current`, an index into its choices, and its
+    /// name) and which are `missing`.
+    RotationAdvanced {
+        timestamp: DateTime<Utc>,
+        rotation_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing: Vec<usize>,
+    },
     /// A rule was created or changed through the API — as written, the way
     /// `GET /automations/{id}` returns it — so a screen showing it, or an
     /// editor holding a draft of it, knows someone else changed it.
@@ -411,6 +434,9 @@ impl Event {
             | Event::RoomLightsChanged { timestamp, .. }
             | Event::SceneChanged { timestamp, .. }
             | Event::SceneRemoved { timestamp, .. }
+            | Event::RotationChanged { timestamp, .. }
+            | Event::RotationRemoved { timestamp, .. }
+            | Event::RotationAdvanced { timestamp, .. }
             | Event::RuleChanged { timestamp, .. }
             | Event::RuleRemoved { timestamp, .. }
             | Event::DeviceSchemaChanged { timestamp, .. }

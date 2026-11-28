@@ -217,6 +217,12 @@ fn visit_action(action: &mut Action, f: &mut dyn FnMut(&mut String) -> Result<()
         } => {
             f(device_id)?;
         }
+        Action::PlayFromRotation {
+            device_id: Some(device_id),
+            ..
+        } => {
+            f(device_id)?;
+        }
         Action::CaptureDeviceState { device_ids, .. } => {
             for device_ref in device_ids {
                 f(device_ref)?;

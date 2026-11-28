@@ -60,6 +60,7 @@ pub mod profile_handlers;
 pub mod rate_limit;
 pub mod registry;
 pub mod room_lights_handlers;
+pub mod rotation_handlers;
 pub mod rule_file_store;
 pub mod streaming;
 pub mod ws;
@@ -1527,6 +1528,25 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/scenes/export", get(handlers::export_scenes))
         .route("/scenes/import", post(handlers::import_scenes))
         .route("/scenes/{id}/activate", post(handlers::activate_scene))
+        // Rotations
+        .route(
+            "/rotations",
+            get(rotation_handlers::list_rotations).post(rotation_handlers::create_rotation),
+        )
+        .route(
+            "/rotations/{id}",
+            get(rotation_handlers::get_rotation)
+                .put(rotation_handlers::update_rotation)
+                .delete(rotation_handlers::delete_rotation),
+        )
+        .route(
+            "/rotations/{id}/play",
+            post(rotation_handlers::play_rotation),
+        )
+        .route(
+            "/rotations/{id}/advance",
+            post(rotation_handlers::advance_rotation),
+        )
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
         // Static, so it wins over `/plugins/:id` — a plugin literally named

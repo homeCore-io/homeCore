@@ -2288,6 +2288,8 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `RestoreDeviceState` | `key` | Re-publish device states saved by `CaptureDeviceState`. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
 | `RoomOff` | `room` | Turn every light in the room off, first saving how they were when at least one is on. See [Action: RoomOn / RoomOff](#action-roomon--roomoff). |
 | `RoomOn` | `room` | Bring the room's lights back as Room off saved them (scenes first), or every light fully on when nothing is saved. See [Action: RoomOn / RoomOff](#action-roomon--roomoff). |
+| `PlayFromRotation` | `rotation_id`, `device_id?` | Play a rotation's choice for now — the next one, or the one this hour/day/week already has — on its device, or on `device_id`. Choices the device no longer offers are skipped. See `GET /rotations`. |
+| `AdvanceRotation` | `rotation_id` | Move a rotation on without playing ("skip this one"); the next use plays the new choice. |
 | `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (`brightness_pct`, `color_temp`, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
 | `DelayPerMode` | `modes`, `default_secs?` | Delay for a duration that depends on the active mode. First matching mode wins. `duration_secs = 0` skips the delay. See [Action: DelayPerMode](#action-delaypermode). |
 | `SetHubVariable` | `name`, `value`, `op?` | Write a cross-rule hub variable. Fires `hub_variable_changed` event. Supports all `VariableOp` operators. See [Hub Variables](#hub-variables). |
