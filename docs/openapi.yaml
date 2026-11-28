@@ -10850,6 +10850,28 @@ components:
                 description: |
                   A device command, e.g. `{"action": "play_playlist", "playlist": "Chill"}`
                   or `{"action": "apply_preset", "preset_id": 7}`.
+              only_when:
+                type: object
+                description: |
+                  When it may play; always when absent. Every part given must
+                  hold. Outside it the choice is passed over, not counted
+                  missing, and one playing in a period gives way to the next
+                  that is for now. With none for now, a play does nothing (409).
+                properties:
+                  modes:
+                    type: array
+                    items: { type: string }
+                    description: One of these modes is on (mode device ids)
+                  between:
+                    type: object
+                    required: [start, end]
+                    description: Local times, `"22:00:00"`; a start after the end runs past midnight
+                    properties:
+                      start: { type: string }
+                      end: { type: string }
+                  days:
+                    type: array
+                    items: { type: string, enum: [Mon, Tue, Wed, Thu, Fri, Sat, Sun] }
         order:
           type: string
           enum: [in_turn, shuffle, random]
@@ -10908,6 +10930,10 @@ components:
                 last_played:
                   type: [string, "null"]
                   format: date-time
+                for_now:
+                  type: array
+                  items: { type: boolean }
+                  description: For each choice, whether its `only_when` holds now
     Scene:
       type: object
       required: [id, name, states]

@@ -7,8 +7,9 @@
 //! adds the clock, the device and the store.
 
 use anyhow::Result;
+use chrono::Datelike;
 use hc_state::StateStore;
-use hc_types::rotation::{period_of, pick, Rotation, RotationAdvance, RotationChoice};
+use hc_types::rotation::{period_of, pick, Moment, Rotation, RotationAdvance, RotationChoice};
 use hc_types::schema::{DeviceSchema, OptionSource};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -36,8 +37,13 @@ pub struct Chosen {
 pub enum Outcome {
     Chosen(Chosen),
     NoRotation,
-    /// The device offers none of its choices any more.
+    /// Of the choices for now, the device offers none any more.
     NothingOffered {
+        rotation: Rotation,
+        missing: Vec<usize>,
+    },
+    /// None of its choices is for now (their times, days or modes).
+    NothingForNow {
         rotation: Rotation,
     },
 }
@@ -66,20 +72,38 @@ pub async fn choose(
         .unwrap_or_default();
     let schema = store.get_device_schema(&device_id).await?;
 
+    let now = hc_time::now_local();
+    let for_now = for_now(store, &rotation, &now).await?;
+
     let before = store.rotation_state(rotation_id).await?;
     let mut state = before.clone();
-    let now = hc_time::now_local();
     let period = period_now(&rotation.advance, &now);
-    let offered = |c: &RotationChoice| offered_by(c, &attrs, schema.as_ref());
-    let mut rand = |n: usize| (Uuid::new_v4().as_u128() % n.max(1) as u128) as usize;
-    let chosen = pick(&rotation, &mut state, period, force, &offered, &mut rand);
+    let (chosen, any_for_now) = {
+        let allowed = |c: &RotationChoice| {
+            let i = rotation.choices.iter().position(|x| std::ptr::eq(x, c));
+            i.is_some_and(|i| for_now[i])
+        };
+        let offered = |c: &RotationChoice| offered_by(c, &attrs, schema.as_ref());
+        let mut rand = |n: usize| (Uuid::new_v4().as_u128() % n.max(1) as u128) as usize;
+        let chosen = pick(
+            &rotation, &mut state, period, force, &allowed, &offered, &mut rand,
+        );
+        (chosen, for_now.iter().any(|&b| b))
+    };
     if chosen.is_some() && !force {
         state.last_played = Some(chrono::Utc::now());
     }
     store.put_rotation_state(&rotation, &before, &state).await?;
 
     let Some(index) = chosen else {
-        return Ok(Outcome::NothingOffered { rotation });
+        return Ok(if any_for_now {
+            Outcome::NothingOffered {
+                rotation,
+                missing: state.missing.clone(),
+            }
+        } else {
+            Outcome::NothingForNow { rotation }
+        });
     };
     let choice = &rotation.choices[index];
     Ok(Outcome::Chosen(Chosen {
@@ -90,6 +114,41 @@ pub async fn choose(
         missing: state.missing.clone(),
         rotation,
     }))
+}
+
+/// Which of a rotation's choices may play at `now`: their times, days and
+/// the modes they are limited to, as those modes are now.
+pub async fn for_now(
+    store: &StateStore,
+    rotation: &Rotation,
+    now: &chrono::DateTime<chrono_tz::Tz>,
+) -> Result<Vec<bool>> {
+    let mut modes_on = std::collections::HashSet::new();
+    for id in rotation
+        .choices
+        .iter()
+        .filter_map(|c| c.only_when.as_ref())
+        .flat_map(|w| &w.modes)
+    {
+        let on = store
+            .get_device(id)
+            .await?
+            .is_some_and(|d| d.attributes.get("on") == Some(&Value::Bool(true)));
+        if on {
+            modes_on.insert(id.clone());
+        }
+    }
+    let mode_on = |id: &str| modes_on.contains(id);
+    let moment = Moment {
+        time: now.time(),
+        day: now.weekday(),
+        mode_on: &mode_on,
+    };
+    Ok(rotation
+        .choices
+        .iter()
+        .map(|c| c.allowed(&moment))
+        .collect())
 }
 
 /// The period this moment falls in: the hour, day or week for `Every`, the
@@ -195,6 +254,7 @@ mod tests {
         RotationChoice {
             label: None,
             command,
+            only_when: None,
         }
     }
 

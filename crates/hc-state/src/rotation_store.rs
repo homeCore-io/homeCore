@@ -134,6 +134,7 @@ mod tests {
                 .map(|p| RotationChoice {
                     label: None,
                     command: json!({ "action": "play_playlist", "playlist": p }),
+                    only_when: None,
                 })
                 .collect(),
             order: RotationOrder::InTurn,

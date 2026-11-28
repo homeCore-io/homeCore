@@ -39,6 +39,64 @@ pub struct RotationChoice {
     /// `{"action": "apply_preset", "preset_id": 7}`.
     #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     pub command: serde_json::Value,
+    /// When it may play; always when absent. Outside it, the choice is
+    /// passed over (not counted missing): calm presets after 10 pm,
+    /// day music and night music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_when: Option<ChoiceWhen>,
+}
+
+/// When a choice may play. Every part given must hold.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceWhen {
+    /// One of these modes is on (mode device ids, e.g. `mode_night`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    /// Between these times of day, local; `22:00`–`06:00` runs past
+    /// midnight. Both ends count, as for the `TimeWindow` condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub between: Option<TimeRange>,
+    /// On these days.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<chrono::Weekday>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeRange {
+    pub start: chrono::NaiveTime,
+    pub end: chrono::NaiveTime,
+}
+
+/// The moment a rotation plays in: what a choice's `only_when` is asked
+/// about.
+pub struct Moment<'a> {
+    pub time: chrono::NaiveTime,
+    pub day: chrono::Weekday,
+    pub mode_on: &'a dyn Fn(&str) -> bool,
+}
+
+impl ChoiceWhen {
+    pub fn holds(&self, m: &Moment) -> bool {
+        let mode = self.modes.is_empty() || self.modes.iter().any(|id| (m.mode_on)(id));
+        let time = self.between.is_none_or(|r| {
+            if r.start <= r.end {
+                m.time >= r.start && m.time <= r.end
+            } else {
+                m.time >= r.start || m.time <= r.end
+            }
+        });
+        let day = self.days.is_empty() || self.days.contains(&m.day);
+        mode && time && day
+    }
+}
+
+impl RotationChoice {
+    /// Whether it may play at `m`.
+    pub fn allowed(&self, m: &Moment) -> bool {
+        self.only_when.as_ref().is_none_or(|w| w.holds(m))
+    }
 }
 
 impl RotationChoice {
@@ -151,16 +209,19 @@ pub fn period_of(advance: &RotationAdvance, local: chrono::NaiveDateTime) -> Opt
 ///
 /// - Within the period `current` was chosen for, and unless `force` (a
 ///   "move on"), it is `current` again.
-/// - Otherwise the next by `order`, skipping (and noting in
+/// - Otherwise the next by `order`, passing over any not `allowed` now
+///   (a night-only choice by day), and skipping (and noting in
 ///   `state.missing`) any the device no longer `offered`.
 ///
-/// `None` when there are no choices, or the device offers none of them.
+/// `None` when there are no choices, or none is both allowed now and
+/// offered.
 /// `rand(n)` returns a number below `n`.
 pub fn pick(
     rotation: &Rotation,
     state: &mut RotationState,
     period: Option<String>,
     force: bool,
+    allowed: &dyn Fn(&RotationChoice) -> bool,
     offered: &dyn Fn(&RotationChoice) -> bool,
     rand: &mut dyn FnMut(usize) -> usize,
 ) -> Option<usize> {
@@ -179,7 +240,9 @@ pub fn pick(
 
     if !force && period.is_some() && state.period == period {
         if let Some(c) = state.current {
-            if offered(&rotation.choices[c]) {
+            // Still for now: night came, and a day-only choice gives way.
+            let c_ok = allowed(&rotation.choices[c]) && offered(&rotation.choices[c]);
+            if c_ok {
                 return Some(c);
             }
         }
@@ -187,6 +250,9 @@ pub fn pick(
 
     for _ in 0..(3 * n + 1) {
         let i = next_index(rotation.order, state, n, rand);
+        if !allowed(&rotation.choices[i]) {
+            continue;
+        }
         if offered(&rotation.choices[i]) {
             state.missing.retain(|&m| m != i);
             state.current = Some(i);
@@ -257,6 +323,7 @@ mod tests {
                 .map(|i| RotationChoice {
                     label: None,
                     command: json!({ "action": "play_playlist", "playlist": format!("p{i}") }),
+                    only_when: None,
                 })
                 .collect(),
             order,
@@ -283,7 +350,7 @@ mod tests {
         let mut s = RotationState::default();
         let mut rand = counter();
         let got: Vec<_> = (0..5)
-            .map(|_| pick(&r, &mut s, None, false, &all, &mut rand).unwrap())
+            .map(|_| pick(&r, &mut s, None, false, &all, &all, &mut rand).unwrap())
             .collect();
         assert_eq!(got, [0, 1, 2, 0, 1]);
     }
@@ -297,7 +364,7 @@ mod tests {
         for _ in 0..4 {
             let mut round: Vec<_> = (0..5)
                 .map(|_| {
-                    let i = pick(&r, &mut s, None, false, &all, &mut rand).unwrap();
+                    let i = pick(&r, &mut s, None, false, &all, &all, &mut rand).unwrap();
                     assert_ne!(Some(i), last, "the same twice running");
                     last = Some(i);
                     i
@@ -315,7 +382,7 @@ mod tests {
         let mut rand = counter();
         let mut last = None;
         for _ in 0..50 {
-            let i = pick(&r, &mut s, None, false, &all, &mut rand).unwrap();
+            let i = pick(&r, &mut s, None, false, &all, &all, &mut rand).unwrap();
             assert_ne!(Some(i), last);
             last = Some(i);
         }
@@ -343,6 +410,7 @@ mod tests {
                 period_of(&every_day, at(d, h)),
                 false,
                 &all,
+                &all,
                 &mut rand,
             )
             .unwrap()
@@ -363,9 +431,15 @@ mod tests {
         let mut s = RotationState::default();
         let mut rand = counter();
         let p = Some("h1:1".to_string());
-        assert_eq!(pick(&r, &mut s, p.clone(), false, &all, &mut rand), Some(0));
-        assert_eq!(pick(&r, &mut s, p.clone(), true, &all, &mut rand), Some(1));
-        assert_eq!(pick(&r, &mut s, p, false, &all, &mut rand), Some(1));
+        assert_eq!(
+            pick(&r, &mut s, p.clone(), false, &all, &all, &mut rand),
+            Some(0)
+        );
+        assert_eq!(
+            pick(&r, &mut s, p.clone(), true, &all, &all, &mut rand),
+            Some(1)
+        );
+        assert_eq!(pick(&r, &mut s, p, false, &all, &all, &mut rand), Some(1));
     }
 
     #[test]
@@ -374,15 +448,30 @@ mod tests {
         let mut s = RotationState::default();
         let mut rand = counter();
         let not_p1 = |c: &RotationChoice| c.command["playlist"] != "p1";
-        assert_eq!(pick(&r, &mut s, None, false, &not_p1, &mut rand), Some(0));
-        assert_eq!(pick(&r, &mut s, None, false, &not_p1, &mut rand), Some(2));
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &not_p1, &mut rand),
+            Some(0)
+        );
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &not_p1, &mut rand),
+            Some(2)
+        );
         assert_eq!(s.missing, [1]);
         // Offered again, it plays, and is no longer noted.
-        assert_eq!(pick(&r, &mut s, None, false, &all, &mut rand), Some(0));
-        assert_eq!(pick(&r, &mut s, None, false, &all, &mut rand), Some(1));
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &all, &mut rand),
+            Some(0)
+        );
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &all, &mut rand),
+            Some(1)
+        );
         assert!(s.missing.is_empty());
         // None offered: nothing plays.
-        assert_eq!(pick(&r, &mut s, None, false, &|_| false, &mut rand), None);
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &|_| false, &mut rand),
+            None
+        );
         assert_eq!(s.missing, [0, 1, 2]);
     }
 
@@ -414,11 +503,108 @@ mod tests {
         assert_eq!(period_of(&RotationAdvance::EachUse, t(27, 9)), None);
     }
 
+    fn moment(
+        h: u32,
+        day: chrono::Weekday,
+        night: bool,
+    ) -> (chrono::NaiveTime, chrono::Weekday, bool) {
+        (
+            chrono::NaiveTime::from_hms_opt(h, 0, 0).unwrap(),
+            day,
+            night,
+        )
+    }
+
+    /// A choice only for some times, days or modes: night-only at night,
+    /// both ends of a window past midnight, and weekends.
+    #[test]
+    fn a_choice_holds_only_when_its_parts_do() {
+        use chrono::Weekday::{Mon, Sat};
+        let w =
+            |modes: &[&str], between: Option<(u32, u32)>, days: Vec<chrono::Weekday>| ChoiceWhen {
+                modes: modes.iter().map(|m| m.to_string()).collect(),
+                between: between.map(|(a, b)| TimeRange {
+                    start: chrono::NaiveTime::from_hms_opt(a, 0, 0).unwrap(),
+                    end: chrono::NaiveTime::from_hms_opt(b, 0, 0).unwrap(),
+                }),
+                days,
+            };
+        let holds =
+            |when: &ChoiceWhen, (time, day, night): (chrono::NaiveTime, chrono::Weekday, bool)| {
+                let mode_on = move |id: &str| id == "mode_night" && night;
+                when.holds(&Moment {
+                    time,
+                    day,
+                    mode_on: &mode_on,
+                })
+            };
+        let at_night = w(&["mode_night"], None, vec![]);
+        assert!(holds(&at_night, moment(23, Mon, true)));
+        assert!(!holds(&at_night, moment(23, Mon, false)));
+        let late = w(&[], Some((22, 6)), vec![]);
+        assert!(holds(&late, moment(23, Mon, false)));
+        assert!(holds(&late, moment(6, Mon, false)));
+        assert!(!holds(&late, moment(12, Mon, false)));
+        let weekends_late = w(&[], Some((22, 6)), vec![Sat, chrono::Weekday::Sun]);
+        assert!(holds(&weekends_late, moment(23, Sat, false)));
+        assert!(!holds(&weekends_late, moment(23, Mon, false)));
+        assert!(holds(&ChoiceWhen::default(), moment(12, Mon, false)));
+    }
+
+    /// Outside its time a choice is passed over, not counted missing; and
+    /// within a period, the choice playing gives way when its time ends.
+    #[test]
+    fn a_choice_not_for_now_is_passed_over_and_gives_way() {
+        let every_day = RotationAdvance::Every {
+            n: 1,
+            unit: PeriodUnit::Day,
+        };
+        let r = rotation(3, RotationOrder::InTurn, every_day);
+        let mut s = RotationState::default();
+        let mut rand = counter();
+        let day = Some("d1:1".to_string());
+        let not_p0 = |c: &RotationChoice| c.command["playlist"] != "p0";
+        assert_eq!(
+            pick(&r, &mut s, day.clone(), false, &not_p0, &all, &mut rand),
+            Some(1)
+        );
+        assert!(s.missing.is_empty());
+        // Same day, but p1's time is over: the next for now plays instead.
+        let not_p1 = |c: &RotationChoice| c.command["playlist"] != "p1";
+        assert_eq!(
+            pick(&r, &mut s, day.clone(), false, &not_p1, &all, &mut rand),
+            Some(2)
+        );
+        // Nothing for now: nothing plays, and nothing is counted missing.
+        assert_eq!(
+            pick(&r, &mut s, day, false, &|_| false, &all, &mut rand),
+            None
+        );
+        assert!(s.missing.is_empty());
+    }
+
+    #[test]
+    fn only_when_reads_as_the_api_writes_it() {
+        let c: RotationChoice = serde_json::from_value(json!({
+            "command": { "action": "play_playlist", "playlist": "Sleep" },
+            "only_when": {
+                "modes": ["mode_night"],
+                "between": { "start": "22:00:00", "end": "06:00:00" },
+                "days": ["Sat", "Sun"]
+            }
+        }))
+        .unwrap();
+        let w = c.only_when.unwrap();
+        assert_eq!(w.modes, ["mode_night"]);
+        assert_eq!(w.days.len(), 2);
+    }
+
     #[test]
     fn a_choice_is_named_by_its_label_or_its_command() {
         let c = |label: Option<&str>, command| RotationChoice {
             label: label.map(str::to_string),
             command,
+            only_when: None,
         };
         assert_eq!(c(Some("Jazz"), json!({})).name(), "Jazz");
         assert_eq!(

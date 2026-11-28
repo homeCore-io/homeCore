@@ -755,10 +755,16 @@ async fn run_rotation(
         crate::rotations::Outcome::NoRotation => {
             warn!(rule = %ctx.rule_name, rotation = %rotation_id, "action: rotation — there is no such rotation");
         }
-        crate::rotations::Outcome::NothingOffered { rotation } => {
+        crate::rotations::Outcome::NothingOffered { rotation, .. } => {
             warn!(
                 rule = %ctx.rule_name, rotation = %rotation.name,
                 "action: rotation — its device offers none of its choices any more; nothing played"
+            );
+        }
+        crate::rotations::Outcome::NothingForNow { rotation } => {
+            info!(
+                rule = %ctx.rule_name, rotation = %rotation.name,
+                "action: rotation — none of its choices is for now; nothing played"
             );
         }
         crate::rotations::Outcome::Chosen(c) => {
