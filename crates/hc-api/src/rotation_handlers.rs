@@ -33,11 +33,12 @@ fn view(rotation: &Rotation, state: &RotationState) -> Value {
     let name = |i: usize| rotation.choices.get(i).map(RotationChoice::name);
     // What plays next, where that can be known: in turn, or the rest of a
     // shuffled round. Random can't say.
+    // A choice known to be missing is passed over, as playing it would.
+    let n = rotation.choices.len();
+    let here = |i: &usize| !state.missing.contains(i);
     let next = match rotation.order {
-        RotationOrder::InTurn if !rotation.choices.is_empty() => {
-            Some(state.position % rotation.choices.len())
-        }
-        RotationOrder::Shuffle => state.order.get(state.position).copied(),
+        RotationOrder::InTurn if n > 0 => (0..n).map(|k| (state.position + k) % n).find(here),
+        RotationOrder::Shuffle => state.order.iter().skip(state.position).copied().find(here),
         _ => None,
     };
     let mut v = json!(rotation);
@@ -316,6 +317,13 @@ mod tests {
         let v = view(&rotation(RotationOrder::InTurn), &state);
         assert_eq!(v["now"]["current_name"], "Chill");
         assert_eq!(v["now"]["next_name"], "Jazz");
+        // Folk is missing: after Jazz comes Chill again.
+        let after_jazz = RotationState {
+            position: 2,
+            ..state.clone()
+        };
+        let v2 = view(&rotation(RotationOrder::InTurn), &after_jazz);
+        assert_eq!(v2["now"]["next_name"], "Chill");
         assert_eq!(v["now"]["missing_names"], json!(["Folk"]));
         assert_eq!(v["name"], "Bathroom music");
         // Random can't know what's next.
