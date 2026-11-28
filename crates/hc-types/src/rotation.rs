@@ -185,6 +185,12 @@ pub struct RotationState {
     pub missing: Vec<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_played: Option<chrono::DateTime<chrono::Utc>>,
+    /// Moved on by hand ("skip this one"): the next play is `current`,
+    /// whatever the pace. Without it, a rotation that moves on each use
+    /// moved on again at the next play, and the skipped-to choice never
+    /// played.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 /// The period a moment falls in, for [`RotationAdvance::Every`]: the same
@@ -236,38 +242,63 @@ pub fn pick(
     if state.order.len() != n || state.order.iter().any(|&i| i >= n) {
         state.order.clear();
     }
-    state.missing.retain(|&i| i < n);
+    // What the device lacks, as it is now: all of it, every pick, so the
+    // list never holds a choice that's back or misses one that's gone.
+    state.missing = (0..n).filter(|&i| !offered(&rotation.choices[i])).collect();
 
-    if !force && period.is_some() && state.period == period {
+    let usable = |i: usize| allowed(&rotation.choices[i]) && offered(&rotation.choices[i]);
+
+    // Held: within the period it was chosen for, or skipped to by hand.
+    if !force && (state.held || (period.is_some() && state.period == period)) {
         if let Some(c) = state.current {
             // Still for now: night came, and a day-only choice gives way.
-            let c_ok = allowed(&rotation.choices[c]) && offered(&rotation.choices[c]);
-            if c_ok {
+            if usable(c) {
+                state.held = false;
+                state.period = period;
                 return Some(c);
             }
         }
     }
 
-    for _ in 0..(3 * n + 1) {
-        let i = next_index(rotation.order, state, n, rand);
-        if !allowed(&rotation.choices[i]) {
-            continue;
+    let chosen = if rotation.order == RotationOrder::Random {
+        // From those that can play now, not the same twice running unless
+        // it's the only one. Drawing blind and skipping could miss the one
+        // that can play, or never pick it when it played last.
+        let mut ok = Vec::new();
+        for i in (0..n).filter(|&i| usable(i)) {
+            ok.push(i);
         }
-        if offered(&rotation.choices[i]) {
-            state.missing.retain(|&m| m != i);
-            state.current = Some(i);
-            state.period = period;
-            return Some(i);
+        let fresh: Vec<usize> = ok
+            .iter()
+            .copied()
+            .filter(|&i| Some(i) != state.current)
+            .collect();
+        let pool = if fresh.is_empty() { ok } else { fresh };
+        (!pool.is_empty()).then(|| pool[rand(pool.len())])
+    } else {
+        // Each tried once at most: `missing` from an earlier pick says
+        // nothing about now, and stopping on its count gave up before
+        // trying choices the device lists again.
+        let mut tried = std::collections::HashSet::new();
+        let mut found = None;
+        for _ in 0..(2 * n + 1) {
+            let i = next_index(rotation.order, state, n, rand);
+            tried.insert(i);
+            if usable(i) {
+                found = Some(i);
+                break;
+            }
+            if tried.len() >= n {
+                break;
+            }
         }
-        if !state.missing.contains(&i) {
-            state.missing.push(i);
-            state.missing.sort_unstable();
-        }
-        if state.missing.len() >= n {
-            break;
-        }
-    }
-    None
+        found
+    };
+    let i = chosen?;
+    state.current = Some(i);
+    state.period = period;
+    state.held = force;
+    Some(i)
 }
 
 fn next_index(
@@ -473,6 +504,57 @@ mod tests {
             None
         );
         assert_eq!(s.missing, [0, 1, 2]);
+    }
+
+    /// Missing noted by an earlier pick doesn't stop this one trying them.
+    #[test]
+    fn old_missing_doesnt_stop_trying_what_is_back() {
+        let r = rotation(3, RotationOrder::InTurn, RotationAdvance::EachUse);
+        let mut s = RotationState {
+            missing: vec![0, 1],
+            position: 2,
+            ..Default::default()
+        };
+        let mut rand = counter();
+        let not_p2 = |c: &RotationChoice| c.command["playlist"] != "p2";
+        assert_eq!(
+            pick(&r, &mut s, None, false, &all, &not_p2, &mut rand),
+            Some(0)
+        );
+        assert_eq!(s.missing, [2]);
+    }
+
+    /// Random plays the only choice it can, even when it played last.
+    #[test]
+    fn random_plays_the_only_one_left_even_if_it_played_last() {
+        let r = rotation(3, RotationOrder::Random, RotationAdvance::EachUse);
+        let mut s = RotationState {
+            current: Some(1),
+            ..Default::default()
+        };
+        let mut rand = counter();
+        let only_p1 = |c: &RotationChoice| c.command["playlist"] == "p1";
+        for _ in 0..20 {
+            assert_eq!(
+                pick(&r, &mut s, None, false, &all, &only_p1, &mut rand),
+                Some(1)
+            );
+        }
+    }
+
+    /// A skip is what the next play plays, even moving on each use.
+    #[test]
+    fn a_skip_is_what_plays_next() {
+        let r = rotation(3, RotationOrder::InTurn, RotationAdvance::EachUse);
+        let mut s = RotationState::default();
+        let mut rand = counter();
+        let mut play = |force: bool, s: &mut RotationState| {
+            pick(&r, s, None, force, &all, &all, &mut rand).unwrap()
+        };
+        assert_eq!(play(false, &mut s), 0);
+        assert_eq!(play(true, &mut s), 1);
+        assert_eq!(play(false, &mut s), 1);
+        assert_eq!(play(false, &mut s), 2);
     }
 
     #[test]

@@ -46,6 +46,12 @@ pub enum Outcome {
     NothingForNow {
         rotation: Rotation,
     },
+    /// The device to play on can't take it: gone from homeCore, or (asked
+    /// for by name) another plugin's, whose commands are not these.
+    BadDevice {
+        rotation: Rotation,
+        why: String,
+    },
 }
 
 /// The choice to play now, moving the rotation on as its `advance` says;
@@ -65,11 +71,26 @@ pub async fn choose(
         .filter(|d| !d.trim().is_empty())
         .unwrap_or(&rotation.device_id)
         .to_string();
-    let attrs = store
-        .get_device(&device_id)
-        .await?
-        .map(|d| d.attributes)
-        .unwrap_or_default();
+    // Its commands are for its own device's plugin: another device must be
+    // one of that plugin's, and either must still exist. A command sent to
+    // a device that's gone, or that speaks another plugin's commands, went
+    // nowhere or did something else.
+    let Some(target) = store.get_device(&device_id).await? else {
+        let why = format!("there is no device “{device_id}” any more");
+        return Ok(Outcome::BadDevice { rotation, why });
+    };
+    if device_id != rotation.device_id {
+        if let Some(own) = store.get_device(&rotation.device_id).await? {
+            if own.plugin_id != target.plugin_id {
+                let why = format!(
+                    "“{device_id}” is {}’s, and {} is for {}’s devices",
+                    target.plugin_id, rotation.name, own.plugin_id
+                );
+                return Ok(Outcome::BadDevice { rotation, why });
+            }
+        }
+    }
+    let attrs = target.attributes;
     let schema = store.get_device_schema(&device_id).await?;
 
     let now = hc_time::now_local();
@@ -77,7 +98,17 @@ pub async fn choose(
 
     let before = store.rotation_state(rotation_id).await?;
     let mut state = before.clone();
-    let period = period_now(&rotation.advance, &now);
+    let period = match period_now(&rotation.advance, &now) {
+        // A rare cron (yearly) that came round more than five weeks ago is
+        // still in the period of that firing, not in a new one: reading it
+        // as new moved the rotation on with no firing.
+        Some(p) if p == "cron:before" => state
+            .period
+            .clone()
+            .filter(|p| p.starts_with("cron:"))
+            .or(Some(p)),
+        other => other,
+    };
     let (chosen, any_for_now) = {
         let allowed = |c: &RotationChoice| {
             let i = rotation.choices.iter().position(|x| std::ptr::eq(x, c));
@@ -109,11 +140,24 @@ pub async fn choose(
     Ok(Outcome::Chosen(Chosen {
         device_id,
         index,
-        name: choice.name(),
+        name: name_on_device(choice, &attrs, schema.as_ref()),
         command: choice.command.clone(),
         missing: state.missing.clone(),
         rotation,
     }))
+}
+
+/// Save a rotation, waiting for any play in progress: one that read the old
+/// rotation would otherwise write its old place back over the fresh one.
+pub async fn save(store: &StateStore, rotation: &Rotation) -> Result<()> {
+    let _turn = TURN.lock().await;
+    store.upsert_rotation(rotation).await
+}
+
+/// Delete a rotation, waiting for any play in progress.
+pub async fn delete(store: &StateStore, id: Uuid) -> Result<bool> {
+    let _turn = TURN.lock().await;
+    store.delete_rotation(id).await
 }
 
 /// Which of a rotation's choices may play at `now`: their times, days and
@@ -159,12 +203,23 @@ fn period_now(advance: &RotationAdvance, now: &chrono::DateTime<chrono_tz::Tz>) 
         RotationAdvance::Every { .. } => period_of(advance, now.naive_local()),
         RotationAdvance::Schedule { cron } => {
             let schedule = cron::Schedule::from_str(cron).ok()?;
-            // The last time it came round, within the past five weeks.
-            let since = *now - chrono::Duration::weeks(5);
-            let last = schedule.after(&since).take_while(|t| t <= now).last();
+            // The last time it came round: looked for in the last hour, then
+            // day, then five weeks. Walking five weeks of an every-second
+            // cron took over a second, with every rotation waiting on it.
+            let last = [
+                chrono::Duration::hours(1),
+                chrono::Duration::days(1),
+                chrono::Duration::weeks(5),
+            ]
+            .into_iter()
+            .find_map(|back| {
+                let since = *now - back;
+                schedule.after(&since).take_while(|t| t <= now).last()
+            });
+            // None in five weeks: `cron:before`, which `choose` reads as
+            // the period it already has.
             Some(match last {
                 Some(t) => format!("cron:{}", t.timestamp()),
-                // Not in five weeks: one period, until it comes round.
                 None => "cron:before".to_string(),
             })
         }
@@ -209,6 +264,11 @@ pub fn offered_by(
         ) else {
             return true;
         };
+        // An empty list is a device that hasn't said yet (a Sonos starting
+        // up reports `[]`), not one that has lost everything.
+        if list.is_empty() {
+            return true;
+        }
         list.iter().any(|e| {
             same(
                 entry_value(e, label_key.as_deref(), value_key.as_deref()),
@@ -216,6 +276,73 @@ pub fn offered_by(
             )
         })
     })
+}
+
+/// A choice's name as its device lists it: its label, else the entry its
+/// value is in the option list (a WLED preset's name, not its number), else
+/// its command's own words.
+pub fn name_on_device(
+    choice: &RotationChoice,
+    attrs: &HashMap<String, Value>,
+    schema: Option<&DeviceSchema>,
+) -> String {
+    if choice
+        .label
+        .as_deref()
+        .is_some_and(|l| !l.trim().is_empty())
+    {
+        return choice.name();
+    }
+    let listed = || -> Option<String> {
+        let cmd = choice.command.as_object()?;
+        let action = cmd.get("action")?.as_str()?;
+        let spec = schema?.actions.iter().find(|a| a.id == action)?;
+        spec.params.iter().find_map(|p| {
+            let Some(OptionSource::Attribute {
+                attribute,
+                label_key,
+                value_key,
+            }) = &p.options_from
+            else {
+                return None;
+            };
+            let want = cmd.get(&p.name)?;
+            let entry = attrs.get(attribute)?.as_array()?.iter().find(|e| {
+                same(
+                    entry_value(e, label_key.as_deref(), value_key.as_deref()),
+                    want,
+                )
+            })?;
+            let label = match entry.as_object() {
+                Some(o) => o
+                    .get(label_key.as_deref().unwrap_or("name"))
+                    .or_else(|| o.get("label"))?,
+                None => entry,
+            };
+            Some(
+                label
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| label.to_string()),
+            )
+        })
+    };
+    listed().unwrap_or_else(|| choice.name())
+}
+
+/// Each of a rotation's choices named as its device lists them.
+pub async fn names(store: &StateStore, rotation: &Rotation) -> Result<Vec<String>> {
+    let attrs = store
+        .get_device(&rotation.device_id)
+        .await?
+        .map(|d| d.attributes)
+        .unwrap_or_default();
+    let schema = store.get_device_schema(&rotation.device_id).await?;
+    Ok(rotation
+        .choices
+        .iter()
+        .map(|c| name_on_device(c, &attrs, schema.as_ref()))
+        .collect())
 }
 
 /// An option list entry's value, read as the app reads it: a plain value
@@ -305,6 +432,38 @@ mod tests {
         assert!(offered_by(&c(json!(7)), &attrs, Some(&s)));
         assert!(offered_by(&c(json!("9")), &attrs, Some(&s)));
         assert!(!offered_by(&c(json!(8)), &attrs, Some(&s)));
+    }
+
+    /// A WLED preset is named as WLED lists it, not by its number; a label
+    /// given wins; a speaker's plain list names itself.
+    #[test]
+    fn a_choice_is_named_as_its_device_lists_it() {
+        let s = schema(json!({
+            "attributes": {},
+            "actions": [{
+                "id": "apply_preset",
+                "label": "Apply a preset",
+                "params": [{
+                    "name": "preset_id", "kind": "int", "required": true,
+                    "options_from": { "attribute": {
+                        "attribute": "presets", "label_key": "name", "value_key": "id"
+                    } }
+                }]
+            }]
+        }));
+        let attrs: HashMap<String, Value> = [(
+            "presets".to_string(),
+            json!([{ "id": 17, "name": "Crisp Autumn" }]),
+        )]
+        .into();
+        let c = choice(json!({ "action": "apply_preset", "preset_id": 17 }));
+        assert_eq!(name_on_device(&c, &attrs, Some(&s)), "Crisp Autumn");
+        assert_eq!(name_on_device(&c, &HashMap::new(), Some(&s)), "17");
+        let labelled = RotationChoice {
+            label: Some("Fall".into()),
+            ..c.clone()
+        };
+        assert_eq!(name_on_device(&labelled, &attrs, Some(&s)), "Fall");
     }
 
     #[test]

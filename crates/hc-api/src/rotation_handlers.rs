@@ -27,6 +27,12 @@ async fn for_now(s: &AppState, r: &Rotation) -> Vec<bool> {
         .unwrap_or_else(|_| vec![true; r.choices.len()])
 }
 
+/// The view, with what may play now and the device's own names.
+async fn shown(s: &AppState, r: &Rotation, state: &RotationState) -> Value {
+    let names = rotations::names(&s.store, r).await.unwrap_or_default();
+    view(r, state, &for_now(s, r).await, &names)
+}
+
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
@@ -38,8 +44,15 @@ fn failed(e: impl std::fmt::Display) -> Response {
 /// A rotation as the API shows it: as written, and where it is.
 /// `for_now`: which choices may play now (their times, days, modes);
 /// "next" passes over the others, as playing would.
-fn view(rotation: &Rotation, state: &RotationState, for_now: &[bool]) -> Value {
-    let name = |i: usize| rotation.choices.get(i).map(RotationChoice::name);
+/// `names`: each choice as its device lists it (a WLED preset's name, not
+/// its number); the command's own words where it has none.
+fn view(rotation: &Rotation, state: &RotationState, for_now: &[bool], names: &[String]) -> Value {
+    let name = |i: usize| {
+        names
+            .get(i)
+            .cloned()
+            .or_else(|| rotation.choices.get(i).map(RotationChoice::name))
+    };
     // What plays next, where that can be known: in turn, or the rest of a
     // shuffled round. Random can't say.
     // A choice known to be missing is passed over, as playing it would.
@@ -95,7 +108,9 @@ async fn invalid(s: &AppState, b: &RotationBody) -> Option<String> {
             return Some("a rotation moves on every 1 or more hours, days or weeks".into())
         }
         RotationAdvance::Schedule { cron } if !rotations::cron_is_valid(cron) => {
-            return Some(format!("“{cron}” isn't a schedule homeCore can read"))
+            return Some(format!(
+                "“{cron}” isn't a schedule homeCore can read: six parts, seconds first (0 0 */2 * * * is every two hours)"
+            ))
         }
         _ => {}
     }
@@ -127,7 +142,7 @@ pub async fn list_rotations(State(s): State<AppState>, _: AutomationsRead) -> Re
     let mut out = Vec::with_capacity(list.len());
     for r in &list {
         let state = s.store.rotation_state(r.id).await.unwrap_or_default();
-        out.push(view(r, &state, &for_now(&s, r).await));
+        out.push(shown(&s, r, &state).await);
     }
     (StatusCode::OK, Json(json!(out))).into_response()
 }
@@ -141,8 +156,7 @@ pub async fn get_rotation(
     match s.store.get_rotation(id).await {
         Ok(Some(r)) => {
             let state = s.store.rotation_state(id).await.unwrap_or_default();
-            let now = for_now(&s, &r).await;
-            (StatusCode::OK, Json(view(&r, &state, &now))).into_response()
+            (StatusCode::OK, Json(shown(&s, &r, &state).await)).into_response()
         }
         Ok(None) => err(StatusCode::NOT_FOUND, "rotation not found"),
         Err(e) => failed(e),
@@ -166,18 +180,18 @@ pub async fn create_rotation(
         order: body.order,
         advance: body.advance,
     };
-    match s.store.upsert_rotation(&r).await {
+    match rotations::save(&s.store, &r).await {
         Ok(()) => (
             StatusCode::CREATED,
-            Json(view(&r, &RotationState::default(), &for_now(&s, &r).await)),
+            Json(shown(&s, &r, &RotationState::default()).await),
         )
             .into_response(),
         Err(e) => failed(e),
     }
 }
 
-/// `PUT /rotations/{id}`. Changing its choices or order starts it afresh;
-/// a new name, device or pace keeps its place.
+/// `PUT /rotations/{id}`. Changing its choices, order or device starts it afresh;
+/// a new name or pace keeps its place.
 pub async fn update_rotation(
     State(s): State<AppState>,
     _: AutomationsWrite,
@@ -200,12 +214,11 @@ pub async fn update_rotation(
         order: body.order,
         advance: body.advance,
     };
-    if let Err(e) = s.store.upsert_rotation(&r).await {
+    if let Err(e) = rotations::save(&s.store, &r).await {
         return failed(e);
     }
     let state = s.store.rotation_state(id).await.unwrap_or_default();
-    let now = for_now(&s, &r).await;
-    (StatusCode::OK, Json(view(&r, &state, &now))).into_response()
+    (StatusCode::OK, Json(shown(&s, &r, &state).await)).into_response()
 }
 
 /// `DELETE /rotations/{id}`
@@ -214,7 +227,7 @@ pub async fn delete_rotation(
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> Response {
-    match s.store.delete_rotation(id).await {
+    match rotations::delete(&s.store, id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, "rotation not found"),
         Err(e) => failed(e),
@@ -240,6 +253,7 @@ pub async fn play_rotation(
     let c = match rotations::choose(&s.store, id, device.as_deref(), false).await {
         Ok(Outcome::Chosen(c)) => c,
         Ok(Outcome::NoRotation) => return err(StatusCode::NOT_FOUND, "rotation not found"),
+        Ok(Outcome::BadDevice { why, .. }) => return err(StatusCode::UNPROCESSABLE_ENTITY, why),
         Ok(Outcome::NothingForNow { rotation }) => {
             return err(
                 StatusCode::CONFLICT,
@@ -262,7 +276,7 @@ pub async fn play_rotation(
         Err(e) => return failed(e),
     };
     let change = DeviceChange::homecore("rotation")
-        .with_actor(Some(claims.sub.clone()), Some(c.rotation.name.clone()))
+        .with_actor(Some(claims.uid.clone()), Some(claims.sub.clone()))
         .with_correlation_id(Some(Uuid::new_v4().to_string()));
     let payload = with_command_change_metadata(c.command.clone(), &change);
     if let Some(ph) = &s.publish {
@@ -309,6 +323,7 @@ pub async fn advance_rotation(
         )
             .into_response(),
         Ok(Outcome::NoRotation) => err(StatusCode::NOT_FOUND, "rotation not found"),
+        Ok(Outcome::BadDevice { why, .. }) => err(StatusCode::CONFLICT, why),
         Ok(Outcome::NothingForNow { rotation }) => err(
             StatusCode::CONFLICT,
             format!("none of {}’s choices is for now", rotation.name),
@@ -354,7 +369,7 @@ mod tests {
             missing: vec![2],
             ..Default::default()
         };
-        let v = view(&rotation(RotationOrder::InTurn), &state, &[]);
+        let v = view(&rotation(RotationOrder::InTurn), &state, &[], &[]);
         assert_eq!(v["now"]["current_name"], "Chill");
         assert_eq!(v["now"]["next_name"], "Jazz");
         // Folk is missing: after Jazz comes Chill again.
@@ -362,19 +377,20 @@ mod tests {
             position: 2,
             ..state.clone()
         };
-        let v2 = view(&rotation(RotationOrder::InTurn), &after_jazz, &[]);
+        let v2 = view(&rotation(RotationOrder::InTurn), &after_jazz, &[], &[]);
         // Chill isn't for now: after Jazz comes nothing else that is.
         let v3 = view(
             &rotation(RotationOrder::InTurn),
             &after_jazz,
             &[false, true, true],
+            &[],
         );
         assert_eq!(v3["now"]["next_name"], "Jazz");
         assert_eq!(v2["now"]["next_name"], "Chill");
         assert_eq!(v["now"]["missing_names"], json!(["Folk"]));
         assert_eq!(v["name"], "Bathroom music");
         // Random can't know what's next.
-        let v = view(&rotation(RotationOrder::Random), &state, &[]);
+        let v = view(&rotation(RotationOrder::Random), &state, &[], &[]);
         assert!(v["now"]["next"].is_null());
     }
 }

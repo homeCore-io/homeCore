@@ -761,6 +761,9 @@ async fn run_rotation(
                 "action: rotation — its device offers none of its choices any more; nothing played"
             );
         }
+        crate::rotations::Outcome::BadDevice { rotation, why } => {
+            warn!(rule = %ctx.rule_name, rotation = %rotation.name, "action: rotation — not played: {why}");
+        }
         crate::rotations::Outcome::NothingForNow { rotation } => {
             info!(
                 rule = %ctx.rule_name, rotation = %rotation.name,

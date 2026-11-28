@@ -1908,8 +1908,8 @@ paths:
       operationId: updateRotation
       summary: Replace a rotation
       description: |
-        Needs `automations:write`. New choices or a new order start it
-        afresh; a new name, device or pace keeps its place.
+        Needs `automations:write`. New choices, order or device start it
+        afresh; a new name or pace keeps its place.
       tags: [rotations]
       security:
         - bearerAuth: []

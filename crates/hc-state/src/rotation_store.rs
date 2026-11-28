@@ -59,7 +59,12 @@ impl RotationStore {
             let mut table = write_txn.open_table(ROTATIONS)?;
             let changed_choices = match table.get(key.as_str())? {
                 Some(old) => serde_json::from_str::<Rotation>(old.value())
-                    .map(|old| old.choices != rotation.choices || old.order != rotation.order)
+                    .map(|old| {
+                        old.choices != rotation.choices
+                            || old.order != rotation.order
+                            // Another device: what it lacks is another matter.
+                            || old.device_id != rotation.device_id
+                    })
                     .unwrap_or(true),
                 None => true,
             };
